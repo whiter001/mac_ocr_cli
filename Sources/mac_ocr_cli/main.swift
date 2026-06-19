@@ -11,7 +11,10 @@ struct MacOCRCLI {
 
     static func main() async {
         do {
-            let options = try CLIParser.parse(Array(CommandLine.arguments.dropFirst()))
+            let options = try CLIParser.parse(
+                Array(CommandLine.arguments.dropFirst()),
+                stdinReader: { Self.readStdin() }
+            )
             try await run(options: options)
         } catch let error as CLIError where error == .helpRequested {
             print(CLIPrinter.usage)
@@ -140,5 +143,12 @@ struct MacOCRCLI {
             try payload.write(to: outputPath, atomically: true, encoding: .utf8)
         }
         print(payload)
+    }
+
+    /// 从 stdin 读取全部 UTF-8 文本。TTY 模式下返回 nil(避免挂起)。
+    private static func readStdin() -> String? {
+        if isatty(STDIN_FILENO) != 0 { return nil }
+        let data = FileHandle.standardInput.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
     }
 }

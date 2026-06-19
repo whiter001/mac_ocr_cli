@@ -154,6 +154,59 @@ struct CLIParserTests {
         #expect(opts.imageURLs.map(\.lastPathComponent) == ["first.png", "z.png"])
     }
 
+    // MARK: - stdin
+
+    @Test("- reads path list from stdin (one per line)")
+    func stdinReadsPathList() throws {
+        let opts = try CLIParser.parse(
+            ["-"],
+            stdinReader: { "/a.png\n/b.png\n/c.png\n" }
+        )
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["a.png", "b.png", "c.png"])
+    }
+
+    @Test("- skips blank lines and #-prefixed comments from stdin")
+    func stdinSkipsBlanksAndComments() throws {
+        let opts = try CLIParser.parse(
+            ["-"],
+            stdinReader: { "# header comment\n\n/a.png\n   \n# another\n/b.png\n" }
+        )
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["a.png", "b.png"])
+    }
+
+    @Test("- can be combined with positional args (positional first)")
+    func stdinCombinedWithPositional() throws {
+        let opts = try CLIParser.parse(
+            ["first.png", "-"],
+            stdinReader: { "/from-stdin.png\n" }
+        )
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["first.png", "from-stdin.png"])
+    }
+
+    @Test("- with no reader throws .stdinRequestedButNoReader")
+    func stdinWithoutReaderThrows() {
+        #expect(throws: CLIError.stdinRequestedButNoReader) {
+            _ = try CLIParser.parse(["-"])
+        }
+    }
+
+    @Test("- with empty stdin throws .stdinEmpty")
+    func stdinEmptyThrows() {
+        #expect(throws: CLIError.stdinEmpty) {
+            _ = try CLIParser.parse(["-"], stdinReader: { "" })
+        }
+        // 只有空行和注释也算空
+        #expect(throws: CLIError.stdinEmpty) {
+            _ = try CLIParser.parse(["-"], stdinReader: { "# only comments\n\n  \n" })
+        }
+    }
+
+    @Test("parseStdinPaths handles CRLF and mixed whitespace")
+    func parseStdinPathsCRLF() {
+        let paths = CLIParser.parseStdinPaths("  /a.png  \r\n/b.png\r\n")
+        #expect(paths == ["/a.png", "/b.png"])
+    }
+
     @Test("--lang without a value throws")
     func missingLangValueThrows() {
         #expect(throws: CLIError.self) {

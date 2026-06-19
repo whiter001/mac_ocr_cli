@@ -21,12 +21,14 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case directoryNotFound(URL)
     case directoryUnreadable(URL)
     case duplicateInput(String)
+    case stdinRequestedButNoReader
+    case stdinEmpty
 
     public var errorDescription: String? {
         switch self {
         case .helpRequested: return nil
         case .versionRequested: return nil
-        case .missingImagePath: return "缺少图片路径（位置参数或 --dir）"
+        case .missingImagePath: return "缺少图片路径（位置参数、--dir 或 stdin `-`）"
         case .invalidArguments(let message): return message
         case .conflictingOutputModes: return "--json 和 --text 不能同时使用"
         case .conflictingKeywordWithOutput: return "--keyword 与 --output/-o 不能同时使用（关键词模式按行打印，不适合结构化文件）"
@@ -36,6 +38,8 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .directoryNotFound(let url): return "目录不存在: \(url.path)"
         case .directoryUnreadable(let url): return "无法读取目录: \(url.path)"
         case .duplicateInput(let path): return "重复的输入: \(path)"
+        case .stdinRequestedButNoReader: return "位置参数 `-` 要求从 stdin 读取路径列表，但当前没有可用的 stdin"
+        case .stdinEmpty: return "stdin 中没有可读取的路径（每行一个，空行与 # 注释会被跳过）"
         }
     }
 }
@@ -81,7 +85,14 @@ public enum CLIParser {
     /// `--cjk` 预设：增加粤语（香港书面语）以覆盖港版 UI。
     public static let cjkLanguages: [String] = ["zh-Hans", "zh-Hant", "zh-HK", "en-US"]
 
-    public static func parse(_ arguments: [String]) throws -> CLIOptions {
+    /// 解析命令行参数。
+    /// - Parameter stdinReader: 注入 stdin 读取逻辑（每行一个路径）,
+    ///   传入 nil 时若位置参数出现 `-` 会抛 `.stdinRequestedButNoReader`。
+    ///   `main.swift` 注入真实 stdin 读取,测试时可注入受控字符串。
+    public static func parse(
+        _ arguments: [String],
+        stdinReader: (() -> String?)? = nil
+    ) throws -> CLIOptions {
         if arguments.contains("--help") || arguments.contains("-h") {
             throw CLIError.helpRequested
         }
@@ -185,10 +196,24 @@ public enum CLIParser {
                 inputDirs.append(dirURL)
 
             default:
-                if argument.hasPrefix("-") {
+                if argument == "-" {
+                    // 从 stdin 读取路径列表
+                    guard let reader = stdinReader else {
+                        throw CLIError.stdinRequestedButNoReader
+                    }
+                    guard let raw = reader() else {
+                        throw CLIError.stdinEmpty
+                    }
+                    let fromStdin = parseStdinPaths(raw)
+                    guard !fromStdin.isEmpty else {
+                        throw CLIError.stdinEmpty
+                    }
+                    imagePaths.append(contentsOf: fromStdin)
+                } else if argument.hasPrefix("-") {
                     throw CLIError.invalidArguments("不支持的参数: \(argument)")
+                } else {
+                    imagePaths.append(argument)
                 }
-                imagePaths.append(argument)
             }
 
             index += 1
@@ -268,6 +293,16 @@ public enum CLIParser {
             return String(path.dropFirst(basePath.count + 1))
         }
         return path
+    }
+
+    /// 把 stdin 文本拆成路径列表。规则:
+    /// - 一行一个,自动 trim 空白
+    /// - 空行与以 `#` 开头的行作为注释跳过
+    /// - 不做去重(去重由上层统一处理,避免与位置参数合并时漏报重复)
+    static func parseStdinPaths(_ raw: String) -> [String] {
+        raw.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.hasPrefix("#") }
     }
 }
 
@@ -380,6 +415,12 @@ public enum CLIPrinter {
     用法:
       mac_ocr_cli <图片路径>... [选项]
       mac_ocr_cli --dir <目录> [选项]
+      find . -name "*.png" | mac_ocr_cli - [选项]
+
+    输入源（可叠加）:
+      <位置参数>...          一张或多张图片路径
+      --dir <目录>           递归扫描目录中的图片
+      -                      从 stdin 读路径列表（每行一个，# 开头是注释）
 
     选项:
       -l, --lang <list>        识别语言，逗号分隔的 BCP-47 标签
@@ -388,7 +429,6 @@ public enum CLIPrinter {
                                与 --lang 互斥
       --level <accurate|fast>  识别等级 (默认: accurate)
       --no-correction          关闭语言自动纠错
-      --dir <目录>             递归扫描目录中的图片（可与位置参数叠加）
       -k, --keyword <kw>       在识别结果里搜索关键词（单文件模式）
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
@@ -401,6 +441,7 @@ public enum CLIPrinter {
       mac_ocr_cli shot.jpg -l en-US --level fast --json
       mac_ocr_cli *.png --cjk
       mac_ocr_cli --dir ./shots --json -o result.json
+      find . -name "*.png" | mac_ocr_cli - --json -o all.json
     """
 
     public static let version = "mac_ocr_cli 1.0.0"

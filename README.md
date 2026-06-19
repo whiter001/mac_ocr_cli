@@ -10,7 +10,7 @@
 - 输出每行文字、置信度与**归一化**边界框（Vision 原生坐标系，原点在左下角）
 - 可选 JSON / 纯文本输出，可写入文件
 - 可选关键词搜索并按相关度排序
-- **批量**：多张图片或递归扫描目录，并发处理，单张失败不影响其他
+- **批量**：多张图片、目录递归扫描、stdin 路径列表，并发处理，单张失败不影响其他
 
 ## 编译
 
@@ -54,6 +54,17 @@ mac_ocr_cli --dir ./shots
 
 # 批量：写到 JSON 文件
 mac_ocr_cli --dir ./shots --json -o all.json
+
+# 批量：stdin 路径列表（`find` 风格）
+find . -name "*.png" | mac_ocr_cli - --json -o all.json
+
+# stdin 支持注释（#）和空行
+cat list.txt | mac_ocr_cli - -l en-US
+# list.txt 格式：
+#   # 截图
+#   /Users/me/Desktop/a.png
+#
+#   /Users/me/Desktop/b.png
 ```
 
 ## 输出结构（JSON）
