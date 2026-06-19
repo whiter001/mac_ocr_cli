@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import MacOCRCore
@@ -18,6 +19,14 @@ struct MacOCRCLI {
 
             if options.windowList {
                 try runWindowList(options: options)
+                return
+            }
+            if let capture = options.clipboardCapture {
+                try runClipboardCapture(options: options, capture: capture)
+                return
+            }
+            if options.pasteboardSource {
+                try await runPasteboardOCR(options: options)
                 return
             }
             if let capture = options.screenCapture {
@@ -158,6 +167,62 @@ struct MacOCRCLI {
 
     private struct WindowListEnvelope: Codable {
         let windows: [ScreenCaptureWindowInfo]
+    }
+
+    private struct ClipboardEnvelope: Codable {
+        let clipboard: Bool
+        let width: Int
+        let height: Int
+        let savePath: String?
+    }
+
+    // MARK: - 截图到剪贴板
+
+    private static func runClipboardCapture(options: CLIOptions, capture: ScreenCaptureOptions) throws {
+        let (w, h) = try Clipboard.writeCapture(options: capture)
+        let savePath = capture.savePath?.path
+
+        let payload: String
+        switch options.outputMode {
+        case .text:
+            if let savePath {
+                payload = "已复制到剪贴板: \(w)x\(h)  另存: \(savePath)"
+            } else {
+                payload = "已复制到剪贴板: \(w)x\(h)"
+            }
+        case .json:
+            let env = ClipboardEnvelope(clipboard: true, width: w, height: h, savePath: savePath)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            payload = String(decoding: try encoder.encode(env), as: UTF8.self)
+        }
+        try emit(payload, to: options.outputPath)
+    }
+
+    // MARK: - 从剪贴板读图 + OCR
+
+    private static func runPasteboardOCR(options: CLIOptions) async throws {
+        let cg = try Clipboard.readImage()
+
+        // CGImage → Data → 临时 PNG → Vision 走标准管线
+        let rep = NSBitmapImageRep(cgImage: cg)
+        guard let pngData = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
+            throw ClipboardError.readDecodeFailed("无法把剪贴板图片编码为 PNG")
+        }
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli-pasteboard-\(UUID().uuidString)")
+            .appendingPathExtension("png")
+        try pngData.write(to: tmp)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let recognizer = makeRecognizer(options: options)
+        let lines = try await recognizer.recognizeText(in: tmp)
+        let report = OCRReport(imagePath: "<clipboard> (\(cg.width)x\(cg.height))", lines: lines)
+
+        let text = CLIOutputRenderer.renderText(report: report, options: options)
+        let json = try CLIOutputRenderer.renderJSON(report: report)
+        let payload = (options.outputMode == .text) ? text : json
+        try emit(payload, to: options.outputPath)
     }
 
     private static func renderWindowListText(windows: [ScreenCaptureWindowInfo]) -> String {

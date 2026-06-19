@@ -325,6 +325,70 @@ struct CLIParserTests {
         }
     }
 
+    // MARK: - 剪贴板
+
+    @Test("--clipboard defaults to main display")
+    func clipboardDefaultsToMainDisplay() throws {
+        let opts = try CLIParser.parse(["--clipboard"])
+        #expect(opts.clipboardCapture != nil)
+        #expect(opts.pasteboardSource == false)
+    }
+
+    @Test("--clipboard + --region captures the region into the pasteboard")
+    func clipboardWithRegion() throws {
+        let opts = try CLIParser.parse(["--clipboard", "--region", "0", "0", "400", "300"])
+        #expect(opts.clipboardCapture != nil)
+    }
+
+    @Test("--clipboard + positional image throws .clipboardWithImageInput")
+    func clipboardWithImageInput() {
+        #expect(throws: CLIError.clipboardWithImageInput) {
+            _ = try CLIParser.parse(["--clipboard", "photo.png"])
+        }
+    }
+
+    @Test("--clipboard + --from-clipboard throws .clipboardAndPasteboard")
+    func clipboardAndPasteboard() {
+        #expect(throws: CLIError.clipboardAndPasteboard) {
+            _ = try CLIParser.parse(["--clipboard", "--from-clipboard"])
+        }
+    }
+
+    @Test("--from-clipboard alone sets pasteboardSource")
+    func fromClipboardAlone() throws {
+        let opts = try CLIParser.parse(["--from-clipboard"])
+        #expect(opts.pasteboardSource == true)
+        #expect(opts.imageURLs.isEmpty)
+    }
+
+    @Test("--from-clipboard + positional throws .pasteboardWithImageInput")
+    func pasteboardWithImageInput() {
+        #expect(throws: CLIError.pasteboardWithImageInput) {
+            _ = try CLIParser.parse(["--from-clipboard", "photo.png"])
+        }
+    }
+
+    @Test("--from-clipboard + --screen throws .pasteboardRequiresClipboard")
+    func pasteboardWithScreen() {
+        #expect(throws: CLIError.pasteboardRequiresClipboard) {
+            _ = try CLIParser.parse(["--from-clipboard", "--screen"])
+        }
+    }
+
+    @Test("--from-clipboard + --keyword still works")
+    func pasteboardWithKeyword() throws {
+        let opts = try CLIParser.parse(["--from-clipboard", "-k", "term"])
+        #expect(opts.pasteboardSource == true)
+        #expect(opts.keyword == "term")
+    }
+
+    @Test("--window-list + --clipboard throws")
+    func windowListWithClipboard() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--window-list", "--clipboard"])
+        }
+    }
+
     @Test("--lang without a value throws")
     func missingLangValueThrows() {
         #expect(throws: CLIError.self) {

@@ -12,6 +12,7 @@
 - 可选关键词搜索并按相关度排序
 - **批量**：多张图片、目录递归扫描、stdin 路径列表，并发处理，单张失败不影响其他
 - **屏幕截图**：截主屏幕、按窗口标题/ID 截、截屏幕区域;另含 `--window-list` 列出可见窗口
+- **剪贴板**：截图到剪贴板(`--clipboard`)、识别剪贴板里的图片(`--from-clipboard`,配合 `Cmd+Shift+Ctrl+4` 使用)
 
 ## 编译
 
@@ -78,7 +79,18 @@ mac_ocr_cli --region 0 0 1200 800
 
 # 列出所有可见窗口（用于查找要截的窗口）
 mac_ocr_cli --window-list
+
+# 截图到剪贴板（不跑 OCR,粘到聊天/邮件直接用）
+mac_ocr_cli --clipboard
+mac_ocr_cli --clipboard --region 0 0 1200 800    # 截区域
+mac_ocr_cli --clipboard --window "Safari"        # 截特定窗口
+
+# 识别剪贴板里的图片（先用系统截图快捷键 Cmd+Shift+Ctrl+4 截到剪贴板）
+mac_ocr_cli --from-clipboard
+mac_ocr_cli --from-clipboard -k "订单号"          # 边识别边搜关键词
 ```
+
+> **剪贴板权限**：剪贴板读写**不需要**任何额外权限（TCC 不管这个）。`--clipboard` 仍需要「屏幕录制」权限,因为内部还是先截图再写入。
 
 > **截图权限**：macOS 10.15+ 需要「屏幕录制」权限（系统设置 → 隐私与安全性）。首次运行 Terminal / iTerm / 其他调用本工具的程序时会被提示授权,或在隐私设置中手动允许。授权后 `CGWindowListCreateImage` 即可工作;未授权时 `--window-list` 返回空,`--screen` 等会返回 nil。
 

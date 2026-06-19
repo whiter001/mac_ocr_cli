@@ -27,12 +27,17 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case captureWithImageInput
     case windowListWithOther
     case saveScreenshotWithoutCapture
+    case clipboardWithImageInput
+    case clipboardAndPasteboard
+    case pasteboardWithImageInput
+    case pasteboardRequiresClipboard
+    case windowListWithClipboard
 
     public var errorDescription: String? {
         switch self {
         case .helpRequested: return nil
         case .versionRequested: return nil
-        case .missingImagePath: return "缺少图片路径（位置参数、--dir、stdin `-`、或 --screen/--window/--region）"
+        case .missingImagePath: return "缺少图片路径（位置参数、--dir、stdin `-`、--screen/--window/--region、--clipboard、--from-clipboard）"
         case .invalidArguments(let message): return message
         case .conflictingOutputModes: return "--json 和 --text 不能同时使用"
         case .conflictingKeywordWithOutput: return "--keyword 与 --output/-o 不能同时使用（关键词模式按行打印，不适合结构化文件）"
@@ -48,6 +53,11 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .captureWithImageInput: return "截图模式（--screen/--window/--region）不能与位置参数 / --dir / stdin `-` 同时使用"
         case .windowListWithOther: return "--window-list 不能与任何截图或输入参数同时使用"
         case .saveScreenshotWithoutCapture: return "--save-screenshot 必须与 --screen/--window/--window-id/--region 同时使用"
+        case .clipboardWithImageInput: return "--clipboard 是截图模式,不能与位置参数 / --dir / stdin `-` / --from-clipboard 同时使用"
+        case .clipboardAndPasteboard: return "--clipboard 与 --from-clipboard 互斥"
+        case .pasteboardWithImageInput: return "--from-clipboard 不能与位置参数 / --dir / stdin `-` 同时使用"
+        case .pasteboardRequiresClipboard: return "--from-clipboard 必须单独使用，不能与 --screen/--window/--region/--clipboard/--window-list 组合"
+        case .windowListWithClipboard: return "--window-list 不能与 --clipboard 同时使用"
         }
     }
 }
@@ -65,6 +75,10 @@ public struct CLIOptions: Equatable, Sendable {
     public let screenCapture: ScreenCaptureOptions?
     /// 仅列出可见窗口（不跑 OCR）。
     public let windowList: Bool
+    /// 截图到剪贴板：非 nil 时调用方先截图并把 PNG 写入 NSPasteboard.general。
+    public let clipboardCapture: ScreenCaptureOptions?
+    /// 从剪贴板读取图片并 OCR。
+    public let pasteboardSource: Bool
 
     public init(
         imageURLs: [URL],
@@ -75,7 +89,9 @@ public struct CLIOptions: Equatable, Sendable {
         outputPath: URL?,
         keyword: String?,
         screenCapture: ScreenCaptureOptions? = nil,
-        windowList: Bool = false
+        windowList: Bool = false,
+        clipboardCapture: ScreenCaptureOptions? = nil,
+        pasteboardSource: Bool = false
     ) {
         self.imageURLs = imageURLs
         self.languages = languages
@@ -86,6 +102,8 @@ public struct CLIOptions: Equatable, Sendable {
         self.keyword = keyword
         self.screenCapture = screenCapture
         self.windowList = windowList
+        self.clipboardCapture = clipboardCapture
+        self.pasteboardSource = pasteboardSource
     }
 
     /// 单文件输入（向后兼容入口）
@@ -130,6 +148,8 @@ public enum CLIParser {
         var captureSource: ScreenCaptureOptions.Source?
         var saveScreenshotPath: URL?
         var windowListRequested = false
+        var clipboardRequested = false
+        var pasteboardRequested = false
 
         var index = 0
         while index < arguments.count {
@@ -262,6 +282,12 @@ public enum CLIParser {
             case "--window-list":
                 windowListRequested = true
 
+            case "--clipboard":
+                clipboardRequested = true
+
+            case "--from-clipboard":
+                pasteboardRequested = true
+
             default:
                 if argument == "-" {
                     // 从 stdin 读取路径列表
@@ -286,16 +312,17 @@ public enum CLIParser {
             index += 1
         }
 
-        // 三种模式互斥：--window-list / 截图(--screen/--window/--window-id/--region) / 文件输入(位置参数/--dir/stdin `-`)
+        // 模式互斥：--window-list / --clipboard / 截图(--screen/--window/--window-id/--region)
+        //          / --from-clipboard / 文件输入(位置参数/--dir/stdin `-`)
+
         if windowListRequested {
             if captureSource != nil || saveScreenshotPath != nil
+                || clipboardRequested || pasteboardRequested
                 || !imagePaths.isEmpty || !inputDirs.isEmpty {
                 throw CLIError.windowListWithOther
             }
-            // --output 总是写 JSON 便于 shell 解析
-            if outputPath != nil {
-                outputMode = .json
-            }
+            if clipboardRequested { throw CLIError.windowListWithClipboard }
+            if outputPath != nil { outputMode = .json }
             return CLIOptions(
                 imageURLs: [],
                 languages: languages,
@@ -306,6 +333,57 @@ public enum CLIParser {
                 keyword: nil,
                 screenCapture: nil,
                 windowList: true
+            )
+        }
+
+        if clipboardRequested {
+            if pasteboardRequested { throw CLIError.clipboardAndPasteboard }
+            if !imagePaths.isEmpty || !inputDirs.isEmpty { throw CLIError.clipboardWithImageInput }
+            if let source = captureSource, case .region = source {
+                // --region with --clipboard: still valid, copy the region
+                _ = source
+            } else if captureSource == nil {
+                captureSource = .mainDisplay
+            }
+            if outputPath != nil { outputMode = .json }
+            return CLIOptions(
+                imageURLs: [],
+                languages: languages,
+                level: level,
+                languageCorrection: languageCorrection,
+                outputMode: outputMode,
+                outputPath: outputPath,
+                keyword: nil,
+                screenCapture: nil,
+                windowList: false,
+                clipboardCapture: ScreenCaptureOptions(
+                    source: captureSource ?? .mainDisplay,
+                    savePath: saveScreenshotPath
+                ),
+                pasteboardSource: false
+            )
+        }
+
+        if pasteboardRequested {
+            if captureSource != nil || saveScreenshotPath != nil {
+                throw CLIError.pasteboardRequiresClipboard
+            }
+            if !imagePaths.isEmpty || !inputDirs.isEmpty {
+                throw CLIError.pasteboardWithImageInput
+            }
+            if keyword == nil, outputPath != nil { outputMode = .json }
+            return CLIOptions(
+                imageURLs: [],
+                languages: languages,
+                level: level,
+                languageCorrection: languageCorrection,
+                outputMode: outputMode,
+                outputPath: outputPath,
+                keyword: keyword,
+                screenCapture: nil,
+                windowList: false,
+                clipboardCapture: nil,
+                pasteboardSource: true
             )
         }
 
@@ -373,7 +451,9 @@ public enum CLIParser {
             outputPath: outputPath,
             keyword: keyword,
             screenCapture: nil,
-            windowList: false
+            windowList: false,
+            clipboardCapture: nil,
+            pasteboardSource: false
         )
     }
 
@@ -535,10 +615,12 @@ public enum CLIPrinter {
       mac_ocr_cli <图片路径>... [选项]                 # 文件输入
       mac_ocr_cli --dir <目录> [选项]
       find . -name "*.png" | mac_ocr_cli - [选项]      # stdin
-      mac_ocr_cli --screen [选项]                       # 截主屏幕
+      mac_ocr_cli --screen [选项]                       # 截主屏幕 + OCR
       mac_ocr_cli --window <查询> [选项]                # 截匹配窗口
       mac_ocr_cli --window-id <id> [选项]
       mac_ocr_cli --region x y w h [选项]               # 截屏幕区域
+      mac_ocr_cli --clipboard [--screen|--window|--window-id|--region]  # 截图到剪贴板
+      mac_ocr_cli --from-clipboard [选项]               # 识别剪贴板里的图片
       mac_ocr_cli --window-list                         # 列出可见窗口
 
     输入源（仅可选其一,不可叠加）:
@@ -546,6 +628,8 @@ public enum CLIPrinter {
       --dir <目录>           递归扫描目录中的图片
       -                      从 stdin 读路径列表（每行一个，# 开头是注释）
       --screen/--window/--window-id/--region  截图后直接 OCR
+      --clipboard            截图后写入剪贴板（不跑 OCR）
+      --from-clipboard       从剪贴板读取图片并 OCR
 
     选项:
       -l, --lang <list>        识别语言，逗号分隔的 BCP-47 标签
@@ -555,7 +639,7 @@ public enum CLIPrinter {
       --level <accurate|fast>  识别等级 (默认: accurate)
       --no-correction          关闭语言自动纠错
       -k, --keyword <kw>       在识别结果里搜索关键词（单文件模式）
-      --save-screenshot <p>    把截图另存到 p(否则用临时文件)
+      --save-screenshot <p>    把截图另存到 p(--clipboard 时也支持)
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
       -o, --output <path>      把结果写入文件（强制 JSON）
@@ -565,6 +649,7 @@ public enum CLIPrinter {
     注意:
       截图功能需要「屏幕录制」权限 (系统设置 → 隐私与安全性)。
       首次运行会被提示授权,或手动在隐私设置中允许本程序。
+      剪贴板读写无需额外权限。
 
     示例:
       mac_ocr_cli photo.png
@@ -574,6 +659,10 @@ public enum CLIPrinter {
       mac_ocr_cli --window "Safari" --save-screenshot ~/shot.png
       mac_ocr_cli --region 0 0 800 600
       mac_ocr_cli --window-list
+      # 截主屏幕到剪贴板,粘到 Slack / 微信 直接用
+      mac_ocr_cli --clipboard
+      # 系统自带截图快捷键 Cmd+Shift+Ctrl+4 截到剪贴板后,识别内容
+      mac_ocr_cli --from-clipboard
     """
 
     public static let version = "mac_ocr_cli 1.0.0"
