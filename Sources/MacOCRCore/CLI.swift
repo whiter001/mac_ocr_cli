@@ -18,24 +18,30 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case invalidRegion(String)
     case invalidLevel(String)
     case conflictingLanguageAndCJK
+    case directoryNotFound(URL)
+    case directoryUnreadable(URL)
+    case duplicateInput(String)
 
     public var errorDescription: String? {
         switch self {
         case .helpRequested: return nil
         case .versionRequested: return nil
-        case .missingImagePath: return "缺少图片路径"
+        case .missingImagePath: return "缺少图片路径（位置参数或 --dir）"
         case .invalidArguments(let message): return message
         case .conflictingOutputModes: return "--json 和 --text 不能同时使用"
         case .conflictingKeywordWithOutput: return "--keyword 与 --output/-o 不能同时使用（关键词模式按行打印，不适合结构化文件）"
         case .invalidRegion(let message): return message
         case .invalidLevel(let value): return "--level 必须是 accurate 或 fast，收到: \(value)"
         case .conflictingLanguageAndCJK: return "--cjk 与 --lang/-l 不能同时使用"
+        case .directoryNotFound(let url): return "目录不存在: \(url.path)"
+        case .directoryUnreadable(let url): return "无法读取目录: \(url.path)"
+        case .duplicateInput(let path): return "重复的输入: \(path)"
         }
     }
 }
 
 public struct CLIOptions: Equatable, Sendable {
-    public let imageURL: URL
+    public let imageURLs: [URL]
     public let languages: [String]
     public let level: VNRequestTextRecognitionLevel
     public let languageCorrection: Bool
@@ -44,7 +50,7 @@ public struct CLIOptions: Equatable, Sendable {
     public let keyword: String?
 
     public init(
-        imageURL: URL,
+        imageURLs: [URL],
         languages: [String],
         level: VNRequestTextRecognitionLevel,
         languageCorrection: Bool,
@@ -52,7 +58,7 @@ public struct CLIOptions: Equatable, Sendable {
         outputPath: URL?,
         keyword: String?
     ) {
-        self.imageURL = imageURL
+        self.imageURLs = imageURLs
         self.languages = languages
         self.level = level
         self.languageCorrection = languageCorrection
@@ -60,6 +66,9 @@ public struct CLIOptions: Equatable, Sendable {
         self.outputPath = outputPath
         self.keyword = keyword
     }
+
+    /// 单文件输入（向后兼容入口）
+    public var isSingleImage: Bool { imageURLs.count == 1 }
 }
 
 // MARK: - 参数解析
@@ -80,7 +89,8 @@ public enum CLIParser {
             throw CLIError.versionRequested
         }
 
-        var imagePath: String?
+        var imagePaths: [String] = []
+        var inputDirs: [URL] = []
         var languages: [String] = defaultLanguages
         var level: VNRequestTextRecognitionLevel = .accurate
         var languageCorrection = true
@@ -159,27 +169,61 @@ public enum CLIParser {
                 }
                 keyword = arguments[index]
 
+            case "--dir":
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--dir 需要一个目录路径")
+                }
+                let dirURL = URL(fileURLWithPath: arguments[index])
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: dirURL.path, isDirectory: &isDir) else {
+                    throw CLIError.directoryNotFound(dirURL)
+                }
+                if !isDir.boolValue {
+                    throw CLIError.directoryNotFound(dirURL)
+                }
+                inputDirs.append(dirURL)
+
             default:
                 if argument.hasPrefix("-") {
                     throw CLIError.invalidArguments("不支持的参数: \(argument)")
                 }
-                guard imagePath == nil else {
-                    throw CLIError.invalidArguments("不支持多个位置参数: \(argument)")
-                }
-                imagePath = argument
+                imagePaths.append(argument)
             }
 
             index += 1
         }
 
-        guard let imagePath else { throw CLIError.missingImagePath }
+        guard !imagePaths.isEmpty || !inputDirs.isEmpty else { throw CLIError.missingImagePath }
 
         if keyword != nil, outputPath != nil {
             throw CLIError.conflictingKeywordWithOutput
         }
 
+        // 合并位置参数和 --dir 扫描结果；按出现顺序去重。
+        var seen = Set<String>()
+        var urls: [URL] = []
+        for raw in imagePaths {
+            let url = URL(fileURLWithPath: raw).standardizedFileURL
+            let key = url.path
+            if seen.insert(key).inserted {
+                urls.append(url)
+            } else {
+                throw CLIError.duplicateInput(key)
+            }
+        }
+        for dir in inputDirs {
+            let scanned = try Self.scanDirectory(dir)
+            for url in scanned {
+                let key = url.path
+                if seen.insert(key).inserted {
+                    urls.append(url)
+                }
+            }
+        }
+
         return CLIOptions(
-            imageURL: URL(fileURLWithPath: imagePath),
+            imageURLs: urls,
             languages: languages,
             level: level,
             languageCorrection: languageCorrection,
@@ -187,6 +231,43 @@ public enum CLIParser {
             outputPath: outputPath,
             keyword: keyword
         )
+    }
+
+    /// ImageIO 支持的扩展名（小写、含 `.`）。
+    public static let supportedExtensions: Set<String> = [
+        ".png", ".jpg", ".jpeg", ".heic", ".heif", ".tiff", ".tif",
+        ".gif", ".webp", ".bmp", ".pdf", ".ico", ".icns"
+    ]
+
+    /// 递归扫描目录,返回按相对路径排序的图片 URL。
+    public static func scanDirectory(_ dir: URL) throws -> [URL] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: dir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            throw CLIError.directoryUnreadable(dir)
+        }
+
+        var found: [(relative: String, url: URL)] = []
+        for case let url as URL in enumerator {
+            let ext = url.pathExtension.lowercased()
+            guard supportedExtensions.contains(".\(ext)") || supportedExtensions.contains(ext) else { continue }
+            let rel = relativize(url: url, base: dir)
+            found.append((rel, url))
+        }
+        found.sort { $0.relative.localizedStandardCompare($1.relative) == .orderedAscending }
+        return found.map(\.url)
+    }
+
+    private static func relativize(url: URL, base: URL) -> String {
+        let basePath = base.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix(basePath + "/") {
+            return String(path.dropFirst(basePath.count + 1))
+        }
+        return path
     }
 }
 
@@ -244,6 +325,43 @@ public enum CLIOutputRenderer {
         return String(decoding: data, as: UTF8.self)
     }
 
+    public static func renderBatchText(batch: OCRBatchReport) -> String {
+        var out: [String] = []
+        out.append("批量识别: 共 \(batch.items.count) 个 (成功 \(batch.successCount), 失败 \(batch.failureCount))")
+        for (i, item) in batch.items.enumerated() {
+            out.append("")
+            out.append("===== [\(i + 1)/\(batch.items.count)] \(item.imagePath) =====")
+            switch item.status {
+            case .ok:
+                let lines = item.lines ?? []
+                out.append("识别行数: \(lines.count)")
+                for line in lines {
+                    let preview = line.text.replacingOccurrences(of: "\n", with: " ")
+                    out.append(String(
+                        format: "- [%d] conf=%.2f box=(%.2f,%.2f,%.2f,%.2f)  %@",
+                        line.index,
+                        line.confidence,
+                        line.boundingBox.x,
+                        line.boundingBox.y,
+                        line.boundingBox.width,
+                        line.boundingBox.height,
+                        preview
+                    ))
+                }
+            case .failed:
+                out.append("失败: \(item.errorMessage ?? "未知错误")")
+            }
+        }
+        return out.joined(separator: "\n")
+    }
+
+    public static func renderBatchJSON(batch: OCRBatchReport) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(batch)
+        return String(decoding: data, as: UTF8.self)
+    }
+
     /// 简单的子串匹配打分：完全相等 1.0，标准化包含 0.9，否则 0。
     /// （`localizedStandardContains` 本身就处理大小写和区域设置，所以不需要独立的大小写分支。）
     static func score(line: OCRTextLine, keyword: String) -> Double {
@@ -260,7 +378,8 @@ public enum CLIPrinter {
     mac_ocr_cli — 基于 Apple Vision 的命令行 OCR 工具
 
     用法:
-      mac_ocr_cli <图片路径> [选项]
+      mac_ocr_cli <图片路径>... [选项]
+      mac_ocr_cli --dir <目录> [选项]
 
     选项:
       -l, --lang <list>        识别语言，逗号分隔的 BCP-47 标签
@@ -269,7 +388,8 @@ public enum CLIPrinter {
                                与 --lang 互斥
       --level <accurate|fast>  识别等级 (默认: accurate)
       --no-correction          关闭语言自动纠错
-      -k, --keyword <kw>       在识别结果里搜索关键词并按相关度排序
+      --dir <目录>             递归扫描目录中的图片（可与位置参数叠加）
+      -k, --keyword <kw>       在识别结果里搜索关键词（单文件模式）
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
       -o, --output <path>      把结果写入文件（强制 JSON）
@@ -279,7 +399,8 @@ public enum CLIPrinter {
     示例:
       mac_ocr_cli photo.png
       mac_ocr_cli shot.jpg -l en-US --level fast --json
-      mac_ocr_cli menu.png --cjk -k "登录" --json -o result.json
+      mac_ocr_cli *.png --cjk
+      mac_ocr_cli --dir ./shots --json -o result.json
     """
 
     public static let version = "mac_ocr_cli 1.0.0"

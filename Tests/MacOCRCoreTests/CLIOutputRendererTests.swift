@@ -17,7 +17,7 @@ struct CLIOutputRendererTests {
 
     private func baseOptions(keyword: String? = nil) -> CLIOptions {
         CLIOptions(
-            imageURL: URL(fileURLWithPath: "/tmp/sample.png"),
+            imageURLs: [URL(fileURLWithPath: "/tmp/sample.png")],
             languages: ["en-US"],
             level: .accurate,
             languageCorrection: true,
@@ -113,5 +113,53 @@ struct CLIOutputRendererTests {
             boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0, height: 0)
         )
         #expect(CLIOutputRenderer.score(line: line, keyword: "beta") == 0.0)
+    }
+
+    // MARK: - 批量输出
+
+    @Test("Batch JSON contains ok and failed items with status field")
+    func batchJSONHasStatusField() throws {
+        let batch = OCRBatchReport(items: [
+            .success(imagePath: "/a.png", lines: [
+                OCRTextLine(index: 0, text: "ok", confidence: 0.9, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ]),
+            .failure(imagePath: "/b.png", error: ImageLoaderError.fileNotFound(URL(fileURLWithPath: "/b.png")))
+        ])
+        let json = try CLIOutputRenderer.renderBatchJSON(batch: batch)
+        #expect(json.contains("\"items\""))
+        #expect(json.contains("\"status\""))
+        #expect(json.contains("\"ok\""))
+        #expect(json.contains("\"failed\""))
+        #expect(json.contains("/a.png"))
+        #expect(json.contains("/b.png"))
+        #expect(json.contains("errorMessage"))
+    }
+
+    @Test("Batch text mode shows per-image header and failure line")
+    func batchTextShowsHeadersAndFailures() {
+        let batch = OCRBatchReport(items: [
+            .success(imagePath: "/a.png", lines: [
+                OCRTextLine(index: 0, text: "hello", confidence: 0.8, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ]),
+            .failure(imagePath: "/b.png", error: ImageLoaderError.fileNotFound(URL(fileURLWithPath: "/b.png")))
+        ])
+        let out = CLIOutputRenderer.renderBatchText(batch: batch)
+        #expect(out.contains("批量识别: 共 2 个 (成功 1, 失败 1)"))
+        #expect(out.contains("===== [1/2] /a.png ====="))
+        #expect(out.contains("===== [2/2] /b.png ====="))
+        #expect(out.contains("失败:"))
+    }
+
+    @Test("BatchItem.success and .failure set the right status")
+    func batchItemFactories() {
+        let ok = OCRBatchItem.success(imagePath: "/x", lines: [])
+        #expect(ok.status == .ok)
+        #expect(ok.lines != nil)
+        #expect(ok.errorMessage == nil)
+
+        let fail = OCRBatchItem.failure(imagePath: "/x", error: ImageLoaderError.fileNotFound(URL(fileURLWithPath: "/x")))
+        #expect(fail.status == .failed)
+        #expect(fail.lines == nil)
+        #expect(fail.errorMessage?.isEmpty == false)
     }
 }

@@ -10,7 +10,7 @@
 - 输出每行文字、置信度与**归一化**边界框（Vision 原生坐标系，原点在左下角）
 - 可选 JSON / 纯文本输出，可写入文件
 - 可选关键词搜索并按相关度排序
-- **批量**：多张图片、目录递归扫描（即将支持）
+- **批量**：多张图片或递归扫描目录，并发处理，单张失败不影响其他
 
 ## 编译
 
@@ -45,9 +45,20 @@ mac_ocr_cli menu.png --cjk
 
 # 在识别结果里搜索关键词
 mac_ocr_cli page.png -k "登录"
+
+# 批量：多张图片（位置参数任意数量）
+mac_ocr_cli a.png b.png c.png
+
+# 批量：递归扫描目录
+mac_ocr_cli --dir ./shots
+
+# 批量：写到 JSON 文件
+mac_ocr_cli --dir ./shots --json -o all.json
 ```
 
 ## 输出结构（JSON）
+
+**单文件模式**（输入只有 1 张图，schema 保持向后兼容）：
 
 ```json
 {
@@ -62,6 +73,29 @@ mac_ocr_cli page.png -k "登录"
   ]
 }
 ```
+
+**批量模式**（≥ 2 张图或 `--dir`）：
+
+```json
+{
+  "items": [
+    {
+      "imagePath": "/abs/path/to/a.png",
+      "status": "ok",
+      "lines": [ { "index": 0, "text": "...", "confidence": 0.9, "boundingBox": {...} } ]
+    },
+    {
+      "imagePath": "/abs/path/to/b.png",
+      "status": "failed",
+      "errorMessage": "图片解码失败（文件可能已损坏）: ..."
+    }
+  ]
+}
+```
+
+- 每项的 `status` 为 `ok` 或 `failed`；失败时 `lines` 为 `null`、有 `errorMessage`。
+- 批量模式并发上限为 `min(4, 核数)`,输出顺序与输入一致。
+- 批量模式在任一项失败时以 exit code **2** 退出,便于 shell 脚本判断。
 
 `boundingBox` 字段均为 `[0, 1]` 归一化值，原点在图像**左下角**（Vision 的 `VNRecognizedTextObservation` 默认行为）。需要屏幕像素坐标时：
 

@@ -26,7 +26,7 @@ struct CLIParserTests {
     @Test("Minimal invocation uses defaults")
     func defaultsForMinimalInvocation() throws {
         let opts = try CLIParser.parse(["photo.png"])
-        #expect(opts.imageURL == URL(fileURLWithPath: "photo.png"))
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["photo.png"])
         #expect(opts.languages == ["zh-Hans", "zh-Hant", "en-US"])
         #expect(opts.level == .accurate)
         #expect(opts.languageCorrection == true)
@@ -104,11 +104,54 @@ struct CLIParserTests {
         }
     }
 
-    @Test("Two positional args throw .invalidArguments")
-    func multiplePositionalArgsThrows() {
+    @Test("Multiple positional args are accepted (batch mode)")
+    func multiplePositionalArgsAreAccepted() throws {
+        let opts = try CLIParser.parse(["a.png", "b.png", "c.png"])
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["a.png", "b.png", "c.png"])
+    }
+
+    @Test("Duplicate positional args throw .duplicateInput")
+    func duplicatePositionalArgsThrow() {
         #expect(throws: CLIError.self) {
-            _ = try CLIParser.parse(["a.png", "b.png"])
+            _ = try CLIParser.parse(["a.png", "a.png"])
         }
+    }
+
+    @Test("--dir recurses and filters by extension")
+    func dirScansRecursively() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_parser_\(UUID().uuidString)")
+        let subdir = tmp.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: subdir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        try Data([0]).write(to: tmp.appendingPathComponent("a.png"))
+        try Data([0]).write(to: tmp.appendingPathComponent("b.txt"))         // not an image
+        try Data([0]).write(to: subdir.appendingPathComponent("c.JPG"))      // uppercase extension
+        try Data([0]).write(to: subdir.appendingPathComponent("d.heic"))
+
+        let opts = try CLIParser.parse(["--dir", tmp.path])
+        let names = opts.imageURLs.map { $0.lastPathComponent }.sorted()
+        #expect(names == ["a.png", "c.JPG", "d.heic"])
+    }
+
+    @Test("--dir on missing path throws .directoryNotFound")
+    func dirMissingThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--dir", "/no/such/path/anywhere"])
+        }
+    }
+
+    @Test("Positional args and --dir are merged, positional first")
+    func positionalAndDirAreMerged() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_merge_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data([0]).write(to: tmp.appendingPathComponent("z.png"))
+
+        let opts = try CLIParser.parse(["first.png", "--dir", tmp.path])
+        #expect(opts.imageURLs.map(\.lastPathComponent) == ["first.png", "z.png"])
     }
 
     @Test("--lang without a value throws")

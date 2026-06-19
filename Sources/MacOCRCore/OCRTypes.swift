@@ -67,3 +67,48 @@ public struct OCRReport: Codable, Hashable, Sendable {
         self.lines = lines
     }
 }
+
+/// 批量模式下的单个结果。一张图片要么是 `status: .ok` 并带 `lines`,
+/// 要么是 `status: .failed` 并带 `errorMessage`——二选一,永不同时为 nil。
+public struct OCRBatchItem: Codable, Hashable, Sendable {
+    public enum Status: String, Codable, Hashable, Sendable {
+        case ok
+        case failed
+    }
+
+    public let imagePath: String
+    public let status: Status
+    public let lines: [OCRTextLine]?
+    public let errorMessage: String?
+
+    public init(imagePath: String, status: Status, lines: [OCRTextLine]?, errorMessage: String?) {
+        self.imagePath = imagePath
+        self.status = status
+        self.lines = lines
+        self.errorMessage = errorMessage
+    }
+
+    public static func success(imagePath: String, lines: [OCRTextLine]) -> OCRBatchItem {
+        OCRBatchItem(imagePath: imagePath, status: .ok, lines: lines, errorMessage: nil)
+    }
+
+    public static func failure(imagePath: String, error: Error) -> OCRBatchItem {
+        OCRBatchItem(
+            imagePath: imagePath,
+            status: .failed,
+            lines: nil,
+            errorMessage: error.localizedDescription
+        )
+    }
+}
+
+public struct OCRBatchReport: Codable, Hashable, Sendable {
+    public let items: [OCRBatchItem]
+
+    public init(items: [OCRBatchItem]) {
+        self.items = items
+    }
+
+    public var successCount: Int { items.lazy.filter { $0.status == .ok }.count }
+    public var failureCount: Int { items.lazy.filter { $0.status == .failed }.count }
+}
