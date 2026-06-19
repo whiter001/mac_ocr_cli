@@ -43,6 +43,27 @@ sudo mv mac_ocr_cli-darwin-universal/mac_ocr_cli /usr/local/bin/
 mac_ocr_cli --version
 ```
 
+## 安装(用 install 脚本 + Claude Code skill)
+
+`scripts/install.sh` 是单文件安装器,默认下载最新 release,顺带把 [Claude Code skill](skill/SKILL.md) 装到 `~/.claude/skills/mac-ocr-cli/`(让 Claude 知道怎么用这个工具)。
+
+```bash
+# 默认:下载最新 release,装到 ~/.local/bin,装 skill 到 ~/.claude/skills/mac-ocr-cli
+./scripts/install.sh
+
+# 从当前 checkout 编译安装(给开发者用)
+./scripts/install.sh --from-source
+
+# 装到 /usr/local 而不是 ~/.local(需要 sudo)
+sudo PREFIX=/usr/local ./scripts/install.sh
+
+# 装特定版本
+./scripts/install.sh --version v0.1.0
+
+# 卸载(同时移除 binary 和 skill)
+./scripts/install.sh --uninstall
+```
+
 ## 发布流程
 
 `.github/workflows/release.yml` 在每次推送 `v*` tag 时自动:
