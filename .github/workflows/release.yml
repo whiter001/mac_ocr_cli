@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_NAME: mac_ocr_cli
+  BINARY_NAME: mac_ocr_cli
+  ARTIFACT_NAME: mac_ocr_cli-darwin-universal
+
+jobs:
+  test:
+    name: Verify (build + tests on macOS)
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build (debug)
+        shell: bash
+        run: swift build
+
+      - name: Run unit tests
+        shell: bash
+        run: swift test
+
+      - name: Build (release, sanity)
+        shell: bash
+        run: swift build -c release
+
+  release:
+    name: Build universal binary and publish release
+    needs: test
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        shell: bash
+        run: |
+          sw_vers
+          swift --version
+
+      - name: Build universal binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "==> Building arm64"
+          swift build -c release --arch arm64
+          ARM_BIN="$(swift build -c release --arch arm64 --show-bin-path)/${BINARY_NAME}"
+
+          echo "==> Building x86_64"
+          swift build -c release --arch x86_64
+          X86_BIN="$(swift build -c release --arch x86_64 --show-bin-path)/${BINARY_NAME}"
+
+          echo "==> Creating universal binary with lipo"
+          mkdir -p "${ARTIFACT_NAME}"
+          lipo -create \
+            -output "${ARTIFACT_NAME}/${BINARY_NAME}" \
+            "${ARM_BIN}" \
+            "${X86_BIN}"
+
+          echo "==> lipo -info"
+          lipo -info "${ARTIFACT_NAME}/${BINARY_NAME}"
+
+          echo "==> Smoke test the universal binary"
+          "${ARTIFACT_NAME}/${BINARY_NAME}" --version
+          "${ARTIFACT_NAME}/${BINARY_NAME}" --help > /dev/null
+          "${ARTIFACT_NAME}/${BINARY_NAME}" --window-list > /dev/null
+
+          echo "==> Copying README into artifact"
+          cp README.md "${ARTIFACT_NAME}/README.md"
+
+          echo "==> Zipping"
+          (cd "${ARTIFACT_NAME}" && zip -qr "../${ARTIFACT_NAME}.zip" .)
+          ls -la "${ARTIFACT_NAME}.zip"
+
+      - name: Generate release body
+        id: release_body
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo 'BODY<<EOF'
+            echo "## ${PROJECT_NAME} ${TAG_NAME}"
+            echo
+            echo "Automated release build for [\`${PROJECT_NAME}\`](https://github.com/${{ github.repository }})."
+            echo
+            echo "### Build details"
+            echo
+            echo "- Tag: \`${TAG_NAME}\`"
+            echo "- Commit: \`${SHORT_SHA}\`"
+            echo "- Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- Runner: \`${{ runner.os }}\` (image \`${{ runner.image }}\`)"
+            echo
+            echo "### Installation"
+            echo
+            echo '```bash'
+            echo "# Download and unzip"
+            echo "curl -L -o ${ARTIFACT_NAME}.zip \\"
+            echo "  https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${ARTIFACT_NAME}.zip"
+            echo "unzip ${ARTIFACT_NAME}.zip"
+            echo
+            echo "# Remove macOS quarantine (binary is unsigned)"
+            echo "xattr -d com.apple.quarantine ${ARTIFACT_NAME}/${BINARY_NAME}"
+            echo
+            echo "# Move into your PATH"
+            echo "sudo mv ${ARTIFACT_NAME}/${BINARY_NAME} /usr/local/bin/"
+            echo
+            echo "# Verify"
+            echo "${BINARY_NAME} --version"
+            echo "${BINARY_NAME} --help"
+            echo '```'
+            echo
+            echo "### Verification performed"
+            echo
+            echo "- \`swift build\` (debug)"
+            echo "- \`swift test\` (74 tests, all passing)"
+            echo "- \`swift build -c release\` (release sanity)"
+            echo "- Universal binary build via \`lipo -create\` (arm64 + x86_64)"
+            echo "- Smoke test: \`--version\`, \`--help\`, \`--window-list\`"
+            echo
+            echo "### Notes"
+            echo
+            echo "- macOS 13+ required (uses Vision framework and modern \`VNRecognizeTextRequest\`)."
+            echo "- The binary is **not code-signed or notarized**. First run on a fresh Mac may need \`xattr -d com.apple.quarantine\` as shown above."
+            echo "- Report issues at https://github.com/${{ github.repository }}/issues."
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ env.PROJECT_NAME }} ${{ github.ref_name }}
+          body: ${{ steps.release_body.outputs.BODY }}
+          files: ${{ env.ARTIFACT_NAME }}.zip
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

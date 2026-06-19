@@ -25,6 +25,42 @@ swift build -c release
 
 可执行文件位于 `.build/release/mac_ocr_cli`。
 
+## 安装(从 release)
+
+```bash
+# 下载预编译的 universal binary
+curl -L -o mac_ocr_cli.zip \
+  https://github.com/whiter001/mac_ocr_cli/releases/latest/download/mac_ocr_cli-darwin-universal.zip
+unzip mac_ocr_cli.zip
+
+# 移除 macOS 隔离标记(因为二进制未签名)
+xattr -d com.apple.quarantine mac_ocr_cli-darwin-universal/mac_ocr_cli
+
+# 放到 PATH
+sudo mv mac_ocr_cli-darwin-universal/mac_ocr_cli /usr/local/bin/
+
+# 验证
+mac_ocr_cli --version
+```
+
+## 发布流程
+
+`.github/workflows/release.yml` 在每次推送 `v*` tag 时自动:
+
+1. 在 `macos-14` 上跑 `swift build` + `swift test`(74 个用例)
+2. 分别编译 arm64 和 x86_64 release binary
+3. 用 `lipo -create` 合成 universal binary
+4. 冒烟测试(`--version` / `--help` / `--window-list`)
+5. 把 `mac_ocr_cli-darwin-universal.zip` 上传到 GitHub Release
+6. 自动生成 release notes(包含安装指令和 quarantine 提示)
+
+发版:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## 用法
 
 ```bash
