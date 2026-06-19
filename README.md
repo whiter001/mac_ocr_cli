@@ -11,6 +11,7 @@
 - 可选 JSON / 纯文本输出，可写入文件
 - 可选关键词搜索并按相关度排序
 - **批量**：多张图片、目录递归扫描、stdin 路径列表，并发处理，单张失败不影响其他
+- **屏幕截图**：截主屏幕、按窗口标题/ID 截、截屏幕区域;另含 `--window-list` 列出可见窗口
 
 ## 编译
 
@@ -65,7 +66,21 @@ cat list.txt | mac_ocr_cli - -l en-US
 #   /Users/me/Desktop/a.png
 #
 #   /Users/me/Desktop/b.png
+
+# 截主屏幕并 OCR
+mac_ocr_cli --screen
+
+# 截特定窗口（按标题或 app 名匹配）
+mac_ocr_cli --window "Safari" --save-screenshot ~/Desktop/shot.png
+
+# 截屏幕区域（左上角原点）
+mac_ocr_cli --region 0 0 1200 800
+
+# 列出所有可见窗口（用于查找要截的窗口）
+mac_ocr_cli --window-list
 ```
+
+> **截图权限**：macOS 10.15+ 需要「屏幕录制」权限（系统设置 → 隐私与安全性）。首次运行 Terminal / iTerm / 其他调用本工具的程序时会被提示授权,或在隐私设置中手动允许。授权后 `CGWindowListCreateImage` 即可工作;未授权时 `--window-list` 返回空,`--screen` 等会返回 nil。
 
 ## 输出结构（JSON）
 

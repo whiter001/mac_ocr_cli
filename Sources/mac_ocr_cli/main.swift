@@ -15,7 +15,16 @@ struct MacOCRCLI {
                 Array(CommandLine.arguments.dropFirst()),
                 stdinReader: { Self.readStdin() }
             )
-            try await run(options: options)
+
+            if options.windowList {
+                try runWindowList(options: options)
+                return
+            }
+            if let capture = options.screenCapture {
+                try await runCaptureThenOCR(options: options, capture: capture)
+                return
+            }
+            try await runFileOCR(options: options)
         } catch let error as CLIError where error == .helpRequested {
             print(CLIPrinter.usage)
             exit(0)
@@ -28,19 +37,68 @@ struct MacOCRCLI {
         }
     }
 
-    // MARK: - 入口分发
+    // MARK: - 窗口列表（不跑 OCR）
 
-    private static func run(options: CLIOptions) async throws {
-        if options.isSingleImage {
-            try await runSingle(options: options)
+    private static func runWindowList(options: CLIOptions) throws {
+        let windows = ScreenCapture.listVisibleWindows()
+        let payload: String
+        switch options.outputMode {
+        case .text:
+            payload = renderWindowListText(windows: windows)
+        case .json:
+            let env = WindowListEnvelope(windows: windows)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            payload = String(decoding: try encoder.encode(env), as: UTF8.self)
+        }
+        try emit(payload, to: options.outputPath)
+    }
+
+    // MARK: - 截图 + OCR
+
+    private static func runCaptureThenOCR(options: CLIOptions, capture: ScreenCaptureOptions) async throws {
+        let pngURL: URL
+        let isTemp: Bool
+        if capture.savePath != nil {
+            pngURL = try ScreenCapture.capturePNG(options: capture)
+            isTemp = false
         } else {
-            try await runBatch(options: options)
+            pngURL = try ScreenCapture.capturePNG(options: capture)
+            isTemp = true
+        }
+        defer { if isTemp { try? FileManager.default.removeItem(at: pngURL) } }
+
+        // 把截图后的 PNG 当作单文件 OCR 输入
+        let singleOptions = CLIOptions(
+            imageURLs: [pngURL],
+            languages: options.languages,
+            level: options.level,
+            languageCorrection: options.languageCorrection,
+            outputMode: options.outputMode,
+            outputPath: options.outputPath,
+            keyword: nil
+        )
+        let recognizer = makeRecognizer(options: singleOptions)
+        let lines = try await recognizer.recognizeText(in: pngURL)
+        let report = OCRReport(imagePath: pngURL.path, lines: lines)
+
+        let text = CLIOutputRenderer.renderText(report: report, options: singleOptions)
+        let json = try CLIOutputRenderer.renderJSON(report: report)
+        let payload = (singleOptions.outputMode == .text) ? text : json
+        try emit(payload, to: singleOptions.outputPath)
+    }
+
+    // MARK: - 文件 OCR(单文件/批量)
+
+    private static func runFileOCR(options: CLIOptions) async throws {
+        if options.isSingleImage {
+            try await runSingleFile(options: options)
+        } else {
+            try await runBatchFiles(options: options)
         }
     }
 
-    // MARK: - 单文件(向后兼容)
-
-    private static func runSingle(options: CLIOptions) async throws {
+    private static func runSingleFile(options: CLIOptions) async throws {
         let url = options.imageURLs[0]
         let recognizer = makeRecognizer(options: options)
         let lines = try await recognizer.recognizeText(in: url)
@@ -48,27 +106,18 @@ struct MacOCRCLI {
 
         let text = CLIOutputRenderer.renderText(report: report, options: options)
         let json = try CLIOutputRenderer.renderJSON(report: report)
-
-        let payload: String
-        switch options.outputMode {
-        case .text: payload = text
-        case .json: payload = json
-        }
+        let payload = (options.outputMode == .text) ? text : json
         try emit(payload, to: options.outputPath)
     }
 
-    // MARK: - 批量
-
-    private static func runBatch(options: CLIOptions) async throws {
+    private static func runBatchFiles(options: CLIOptions) async throws {
         let recognizer = makeRecognizer(options: options)
 
-        // TaskGroup 保持输入顺序,所以输出稳定。
         let items: [OCRBatchItem] = await withTaskGroup(of: (Int, OCRBatchItem).self) { group in
             var nextIndex = 0
             var capacity = maxConcurrentImages
             var collected: [(Int, OCRBatchItem)] = []
 
-            // 启动前 capacity 个 worker
             while capacity > 0, nextIndex < options.imageURLs.count {
                 let url = options.imageURLs[nextIndex]
                 let index = nextIndex
@@ -80,7 +129,6 @@ struct MacOCRCLI {
                 }
             }
 
-            // 任一 worker 完成就启动下一个,保持并发稳定
             while let (index, item) = await group.next() {
                 collected.append((index, item))
                 if nextIndex < options.imageURLs.count {
@@ -94,27 +142,35 @@ struct MacOCRCLI {
                 }
             }
 
-            return collected
-                .sorted { $0.0 < $1.0 }
-                .map(\.1)
+            return collected.sorted { $0.0 < $1.0 }.map(\.1)
         }
 
         let batch = OCRBatchReport(items: items)
-
         let text = CLIOutputRenderer.renderBatchText(batch: batch)
         let json = try CLIOutputRenderer.renderBatchJSON(batch: batch)
-
-        let payload: String
-        switch options.outputMode {
-        case .text: payload = text
-        case .json: payload = json
-        }
+        let payload = (options.outputMode == .text) ? text : json
         try emit(payload, to: options.outputPath)
 
-        // 批量模式下,只要有失败就以非 0 退出,便于 shell 脚本判断
-        if batch.failureCount > 0 {
-            exit(2)
+        if batch.failureCount > 0 { exit(2) }
+    }
+
+    // MARK: - 辅助
+
+    private struct WindowListEnvelope: Codable {
+        let windows: [ScreenCaptureWindowInfo]
+    }
+
+    private static func renderWindowListText(windows: [ScreenCaptureWindowInfo]) -> String {
+        guard !windows.isEmpty else { return "（无可用窗口——可能未授予屏幕录制权限）" }
+        var lines: [String] = []
+        lines.append("可见窗口: \(windows.count) 个")
+        for w in windows {
+            let name = w.windowName?.isEmpty == false ? w.windowName! : "（无标题）"
+            let owner = w.ownerName ?? "?"
+            let bounds = w.bounds.map { "(\($0.x),\($0.y),\($0.width),\($0.height))" } ?? "(no bounds)"
+            lines.append("  id=\(w.windowID) layer=\(w.layer) [\(owner)] \(name)  \(bounds)")
         }
+        return lines.joined(separator: "\n")
     }
 
     private static func recognizeOne(url: URL, with recognizer: VisionOCRRecognizer) async -> OCRBatchItem {

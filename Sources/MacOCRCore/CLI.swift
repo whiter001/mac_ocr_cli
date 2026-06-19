@@ -23,12 +23,16 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case duplicateInput(String)
     case stdinRequestedButNoReader
     case stdinEmpty
+    case conflictingCaptureModes
+    case captureWithImageInput
+    case windowListWithOther
+    case saveScreenshotWithoutCapture
 
     public var errorDescription: String? {
         switch self {
         case .helpRequested: return nil
         case .versionRequested: return nil
-        case .missingImagePath: return "缺少图片路径（位置参数、--dir 或 stdin `-`）"
+        case .missingImagePath: return "缺少图片路径（位置参数、--dir、stdin `-`、或 --screen/--window/--region）"
         case .invalidArguments(let message): return message
         case .conflictingOutputModes: return "--json 和 --text 不能同时使用"
         case .conflictingKeywordWithOutput: return "--keyword 与 --output/-o 不能同时使用（关键词模式按行打印，不适合结构化文件）"
@@ -40,6 +44,10 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .duplicateInput(let path): return "重复的输入: \(path)"
         case .stdinRequestedButNoReader: return "位置参数 `-` 要求从 stdin 读取路径列表，但当前没有可用的 stdin"
         case .stdinEmpty: return "stdin 中没有可读取的路径（每行一个，空行与 # 注释会被跳过）"
+        case .conflictingCaptureModes: return "--screen / --window / --window-id / --region 只能选一个"
+        case .captureWithImageInput: return "截图模式（--screen/--window/--region）不能与位置参数 / --dir / stdin `-` 同时使用"
+        case .windowListWithOther: return "--window-list 不能与任何截图或输入参数同时使用"
+        case .saveScreenshotWithoutCapture: return "--save-screenshot 必须与 --screen/--window/--window-id/--region 同时使用"
         }
     }
 }
@@ -53,6 +61,11 @@ public struct CLIOptions: Equatable, Sendable {
     public let outputPath: URL?
     public let keyword: String?
 
+    /// 截图模式：非 nil 时由调用方先截图,再把产物作为单文件 OCR 输入。
+    public let screenCapture: ScreenCaptureOptions?
+    /// 仅列出可见窗口（不跑 OCR）。
+    public let windowList: Bool
+
     public init(
         imageURLs: [URL],
         languages: [String],
@@ -60,7 +73,9 @@ public struct CLIOptions: Equatable, Sendable {
         languageCorrection: Bool,
         outputMode: CLIOutputMode,
         outputPath: URL?,
-        keyword: String?
+        keyword: String?,
+        screenCapture: ScreenCaptureOptions? = nil,
+        windowList: Bool = false
     ) {
         self.imageURLs = imageURLs
         self.languages = languages
@@ -69,6 +84,8 @@ public struct CLIOptions: Equatable, Sendable {
         self.outputMode = outputMode
         self.outputPath = outputPath
         self.keyword = keyword
+        self.screenCapture = screenCapture
+        self.windowList = windowList
     }
 
     /// 单文件输入（向后兼容入口）
@@ -110,6 +127,9 @@ public enum CLIParser {
         var explicitOutputMode = false
         var outputPath: URL?
         var keyword: String?
+        var captureSource: ScreenCaptureOptions.Source?
+        var saveScreenshotPath: URL?
+        var windowListRequested = false
 
         var index = 0
         while index < arguments.count {
@@ -195,6 +215,53 @@ public enum CLIParser {
                 }
                 inputDirs.append(dirURL)
 
+            case "--screen":
+                if captureSource != nil { throw CLIError.conflictingCaptureModes }
+                captureSource = .mainDisplay
+
+            case "--window":
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--window 需要一个窗口标题或应用名称")
+                }
+                if captureSource != nil { throw CLIError.conflictingCaptureModes }
+                captureSource = .windowQuery(arguments[index])
+
+            case "--window-id":
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--window-id 需要一个窗口编号")
+                }
+                guard let parsed = UInt32(arguments[index]), parsed > 0 else {
+                    throw CLIError.invalidArguments("--window-id 必须是大于 0 的数字")
+                }
+                if captureSource != nil { throw CLIError.conflictingCaptureModes }
+                captureSource = .windowID(parsed)
+
+            case "--region":
+                guard index + 4 < arguments.count,
+                      let x = Double(arguments[index + 1]),
+                      let y = Double(arguments[index + 2]),
+                      let w = Double(arguments[index + 3]),
+                      let h = Double(arguments[index + 4]),
+                      w > 0, h > 0
+                else {
+                    throw CLIError.invalidArguments("--region 需要 4 个正数: x y width height")
+                }
+                if captureSource != nil { throw CLIError.conflictingCaptureModes }
+                captureSource = .region(CGRect(x: x, y: y, width: w, height: h))
+                index += 4
+
+            case "--save-screenshot":
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--save-screenshot 需要一个值")
+                }
+                saveScreenshotPath = URL(fileURLWithPath: arguments[index])
+
+            case "--window-list":
+                windowListRequested = true
+
             default:
                 if argument == "-" {
                     // 从 stdin 读取路径列表
@@ -219,6 +286,56 @@ public enum CLIParser {
             index += 1
         }
 
+        // 三种模式互斥：--window-list / 截图(--screen/--window/--window-id/--region) / 文件输入(位置参数/--dir/stdin `-`)
+        if windowListRequested {
+            if captureSource != nil || saveScreenshotPath != nil
+                || !imagePaths.isEmpty || !inputDirs.isEmpty {
+                throw CLIError.windowListWithOther
+            }
+            // --output 总是写 JSON 便于 shell 解析
+            if outputPath != nil {
+                outputMode = .json
+            }
+            return CLIOptions(
+                imageURLs: [],
+                languages: languages,
+                level: level,
+                languageCorrection: languageCorrection,
+                outputMode: outputMode,
+                outputPath: outputPath,
+                keyword: nil,
+                screenCapture: nil,
+                windowList: true
+            )
+        }
+
+        if let source = captureSource {
+            if !imagePaths.isEmpty || !inputDirs.isEmpty {
+                throw CLIError.captureWithImageInput
+            }
+            if keyword != nil {
+                throw CLIError.invalidArguments("--keyword 不能与截图模式同时使用")
+            }
+            if outputPath != nil {
+                outputMode = .json
+            }
+            return CLIOptions(
+                imageURLs: [],
+                languages: languages,
+                level: level,
+                languageCorrection: languageCorrection,
+                outputMode: outputMode,
+                outputPath: outputPath,
+                keyword: nil,
+                screenCapture: ScreenCaptureOptions(source: source, savePath: saveScreenshotPath),
+                windowList: false
+            )
+        }
+
+        // 文件输入分支
+        if saveScreenshotPath != nil {
+            throw CLIError.saveScreenshotWithoutCapture
+        }
         guard !imagePaths.isEmpty || !inputDirs.isEmpty else { throw CLIError.missingImagePath }
 
         if keyword != nil, outputPath != nil {
@@ -254,7 +371,9 @@ public enum CLIParser {
             languageCorrection: languageCorrection,
             outputMode: outputMode,
             outputPath: outputPath,
-            keyword: keyword
+            keyword: keyword,
+            screenCapture: nil,
+            windowList: false
         )
     }
 
@@ -413,14 +532,20 @@ public enum CLIPrinter {
     mac_ocr_cli — 基于 Apple Vision 的命令行 OCR 工具
 
     用法:
-      mac_ocr_cli <图片路径>... [选项]
+      mac_ocr_cli <图片路径>... [选项]                 # 文件输入
       mac_ocr_cli --dir <目录> [选项]
-      find . -name "*.png" | mac_ocr_cli - [选项]
+      find . -name "*.png" | mac_ocr_cli - [选项]      # stdin
+      mac_ocr_cli --screen [选项]                       # 截主屏幕
+      mac_ocr_cli --window <查询> [选项]                # 截匹配窗口
+      mac_ocr_cli --window-id <id> [选项]
+      mac_ocr_cli --region x y w h [选项]               # 截屏幕区域
+      mac_ocr_cli --window-list                         # 列出可见窗口
 
-    输入源（可叠加）:
+    输入源（仅可选其一,不可叠加）:
       <位置参数>...          一张或多张图片路径
       --dir <目录>           递归扫描目录中的图片
       -                      从 stdin 读路径列表（每行一个，# 开头是注释）
+      --screen/--window/--window-id/--region  截图后直接 OCR
 
     选项:
       -l, --lang <list>        识别语言，逗号分隔的 BCP-47 标签
@@ -430,18 +555,25 @@ public enum CLIPrinter {
       --level <accurate|fast>  识别等级 (默认: accurate)
       --no-correction          关闭语言自动纠错
       -k, --keyword <kw>       在识别结果里搜索关键词（单文件模式）
+      --save-screenshot <p>    把截图另存到 p(否则用临时文件)
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
       -o, --output <path>      把结果写入文件（强制 JSON）
       -v, --version            打印版本
       -h, --help               显示本帮助
 
+    注意:
+      截图功能需要「屏幕录制」权限 (系统设置 → 隐私与安全性)。
+      首次运行会被提示授权,或手动在隐私设置中允许本程序。
+
     示例:
       mac_ocr_cli photo.png
-      mac_ocr_cli shot.jpg -l en-US --level fast --json
-      mac_ocr_cli *.png --cjk
       mac_ocr_cli --dir ./shots --json -o result.json
       find . -name "*.png" | mac_ocr_cli - --json -o all.json
+      mac_ocr_cli --screen --cjk
+      mac_ocr_cli --window "Safari" --save-screenshot ~/shot.png
+      mac_ocr_cli --region 0 0 800 600
+      mac_ocr_cli --window-list
     """
 
     public static let version = "mac_ocr_cli 1.0.0"

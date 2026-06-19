@@ -207,6 +207,124 @@ struct CLIParserTests {
         #expect(paths == ["/a.png", "/b.png"])
     }
 
+    // MARK: - 截图模式
+
+    @Test("--screen sets main display capture, no imageURLs")
+    func screenCaptureMode() throws {
+        let opts = try CLIParser.parse(["--screen"])
+        #expect(opts.screenCapture != nil)
+        #expect(opts.imageURLs.isEmpty)
+        #expect(opts.windowList == false)
+    }
+
+    @Test("--window with query sets windowQuery capture source")
+    func windowCaptureMode() throws {
+        let opts = try CLIParser.parse(["--window", "Safari"])
+        #expect(opts.screenCapture != nil)
+    }
+
+    @Test("--window-id with valid id sets windowID capture")
+    func windowIdCaptureMode() throws {
+        let opts = try CLIParser.parse(["--window-id", "12345"])
+        #expect(opts.screenCapture != nil)
+    }
+
+    @Test("--window-id rejects 0 and non-numeric")
+    func windowIdValidation() {
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-id", "0"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-id", "abc"]) }
+    }
+
+    @Test("--region parses 4 numbers into a CGRect capture")
+    func regionCaptureMode() throws {
+        let opts = try CLIParser.parse(["--region", "100", "200", "800", "600"])
+        #expect(opts.screenCapture != nil)
+    }
+
+    @Test("--region rejects non-positive width/height or missing args")
+    func regionValidation() {
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--region", "0", "0", "0", "100"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--region", "0", "0"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--region", "a", "b", "c", "d"]) }
+    }
+
+    @Test("--save-screenshot must be paired with a capture mode")
+    func saveScreenshotRequiresCapture() {
+        #expect(throws: CLIError.saveScreenshotWithoutCapture) {
+            _ = try CLIParser.parse(["--save-screenshot", "/tmp/x.png", "photo.png"])
+        }
+    }
+
+    @Test("Multiple capture sources throw .conflictingCaptureModes")
+    func conflictingCaptureModes() {
+        #expect(throws: CLIError.conflictingCaptureModes) {
+            _ = try CLIParser.parse(["--screen", "--window", "Safari"])
+        }
+        #expect(throws: CLIError.conflictingCaptureModes) {
+            _ = try CLIParser.parse(["--region", "0", "0", "100", "100", "--screen"])
+        }
+    }
+
+    @Test("Capture + positional image path throws .captureWithImageInput")
+    func captureWithImageInput() {
+        #expect(throws: CLIError.captureWithImageInput) {
+            _ = try CLIParser.parse(["--screen", "photo.png"])
+        }
+    }
+
+    @Test("Capture + --dir throws .captureWithImageInput")
+    func captureWithDir() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_capture_dir_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        #expect(throws: CLIError.captureWithImageInput) {
+            _ = try CLIParser.parse(["--screen", "--dir", tmp.path])
+        }
+    }
+
+    @Test("Capture + stdin `-` throws .captureWithImageInput")
+    func captureWithStdin() {
+        #expect(throws: CLIError.captureWithImageInput) {
+            _ = try CLIParser.parse(["--screen", "-"], stdinReader: { "/a.png\n" })
+        }
+    }
+
+    @Test("Capture + --keyword throws .invalidArguments")
+    func captureWithKeyword() {
+        do {
+            _ = try CLIParser.parse(["--screen", "--keyword", "term"])
+            Issue.record("expected error")
+        } catch let error as CLIError {
+            if case .invalidArguments = error { return }
+            Issue.record("expected .invalidArguments, got \(error)")
+        } catch {
+            Issue.record("expected CLIError, got \(error)")
+        }
+    }
+
+    @Test("--window-list sets windowList and clears everything else")
+    func windowListMode() throws {
+        let opts = try CLIParser.parse(["--window-list"])
+        #expect(opts.windowList == true)
+        #expect(opts.imageURLs.isEmpty)
+        #expect(opts.screenCapture == nil)
+    }
+
+    @Test("--window-list + capture throws .windowListWithOther")
+    func windowListWithCapture() {
+        #expect(throws: CLIError.windowListWithOther) {
+            _ = try CLIParser.parse(["--window-list", "--screen"])
+        }
+    }
+
+    @Test("--window-list + positional throws .windowListWithOther")
+    func windowListWithPositional() {
+        #expect(throws: CLIError.windowListWithOther) {
+            _ = try CLIParser.parse(["--window-list", "photo.png"])
+        }
+    }
+
     @Test("--lang without a value throws")
     func missingLangValueThrows() {
         #expect(throws: CLIError.self) {
