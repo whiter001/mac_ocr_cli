@@ -389,6 +389,29 @@ struct CLIParserTests {
         }
     }
 
+    // MARK: - --quiet
+
+    @Test("--quiet and -q set quiet=true")
+    func quietFlag() throws {
+        let opts1 = try CLIParser.parse(["--quiet", "photo.png"])
+        #expect(opts1.quiet == true)
+        let opts2 = try CLIParser.parse(["-q", "photo.png"])
+        #expect(opts2.quiet == true)
+    }
+
+    @Test("Default is quiet=false")
+    func quietDefault() throws {
+        let opts = try CLIParser.parse(["photo.png"])
+        #expect(opts.quiet == false)
+    }
+
+    @Test("--quiet can be combined with batch / --dir / --json / --output")
+    func quietCombinations() throws {
+        let opts = try CLIParser.parse(["--quiet", "--dir", "/tmp", "--json", "-o", "/tmp/r.json"])
+        #expect(opts.quiet == true)
+        #expect(opts.outputMode == .json)
+    }
+
     @Test("--lang without a value throws")
     func missingLangValueThrows() {
         #expect(throws: CLIError.self) {

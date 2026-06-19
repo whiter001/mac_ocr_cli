@@ -70,6 +70,7 @@ public struct CLIOptions: Equatable, Sendable {
     public let outputMode: CLIOutputMode
     public let outputPath: URL?
     public let keyword: String?
+    public let quiet: Bool
 
     /// 截图模式：非 nil 时由调用方先截图,再把产物作为单文件 OCR 输入。
     public let screenCapture: ScreenCaptureOptions?
@@ -88,6 +89,7 @@ public struct CLIOptions: Equatable, Sendable {
         outputMode: CLIOutputMode,
         outputPath: URL?,
         keyword: String?,
+        quiet: Bool = false,
         screenCapture: ScreenCaptureOptions? = nil,
         windowList: Bool = false,
         clipboardCapture: ScreenCaptureOptions? = nil,
@@ -100,6 +102,7 @@ public struct CLIOptions: Equatable, Sendable {
         self.outputMode = outputMode
         self.outputPath = outputPath
         self.keyword = keyword
+        self.quiet = quiet
         self.screenCapture = screenCapture
         self.windowList = windowList
         self.clipboardCapture = clipboardCapture
@@ -145,6 +148,7 @@ public enum CLIParser {
         var explicitOutputMode = false
         var outputPath: URL?
         var keyword: String?
+        var quiet = false
         var captureSource: ScreenCaptureOptions.Source?
         var saveScreenshotPath: URL?
         var windowListRequested = false
@@ -192,6 +196,9 @@ public enum CLIParser {
 
             case "--no-correction":
                 languageCorrection = false
+
+            case "--quiet", "-q":
+                quiet = true
 
             case "--json":
                 if explicitOutputMode, outputMode != .json { throw CLIError.conflictingOutputModes }
@@ -331,6 +338,7 @@ public enum CLIParser {
                 outputMode: outputMode,
                 outputPath: outputPath,
                 keyword: nil,
+                quiet: quiet,
                 screenCapture: nil,
                 windowList: true
             )
@@ -354,6 +362,7 @@ public enum CLIParser {
                 outputMode: outputMode,
                 outputPath: outputPath,
                 keyword: nil,
+                quiet: quiet,
                 screenCapture: nil,
                 windowList: false,
                 clipboardCapture: ScreenCaptureOptions(
@@ -380,6 +389,7 @@ public enum CLIParser {
                 outputMode: outputMode,
                 outputPath: outputPath,
                 keyword: keyword,
+                quiet: quiet,
                 screenCapture: nil,
                 windowList: false,
                 clipboardCapture: nil,
@@ -405,6 +415,7 @@ public enum CLIParser {
                 outputMode: outputMode,
                 outputPath: outputPath,
                 keyword: nil,
+                quiet: quiet,
                 screenCapture: ScreenCaptureOptions(source: source, savePath: saveScreenshotPath),
                 windowList: false
             )
@@ -450,6 +461,7 @@ public enum CLIParser {
             outputMode: outputMode,
             outputPath: outputPath,
             keyword: keyword,
+                quiet: quiet,
             screenCapture: nil,
             windowList: false,
             clipboardCapture: nil,
@@ -640,6 +652,7 @@ public enum CLIPrinter {
       --no-correction          关闭语言自动纠错
       -k, --keyword <kw>       在识别结果里搜索关键词（单文件模式）
       --save-screenshot <p>    把截图另存到 p(--clipboard 时也支持)
+      -q, --quiet              抑制 stdout 报告和 stderr 进度；错误仍到 stderr
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
       -o, --output <path>      把结果写入文件（强制 JSON）

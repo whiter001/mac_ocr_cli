@@ -60,7 +60,7 @@ struct MacOCRCLI {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             payload = String(decoding: try encoder.encode(env), as: UTF8.self)
         }
-        try emit(payload, to: options.outputPath)
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
     }
 
     // MARK: - 截图 + OCR
@@ -85,7 +85,8 @@ struct MacOCRCLI {
             languageCorrection: options.languageCorrection,
             outputMode: options.outputMode,
             outputPath: options.outputPath,
-            keyword: nil
+            keyword: nil,
+            quiet: options.quiet
         )
         let recognizer = makeRecognizer(options: singleOptions)
         let lines = try await recognizer.recognizeText(in: pngURL)
@@ -94,7 +95,7 @@ struct MacOCRCLI {
         let text = CLIOutputRenderer.renderText(report: report, options: singleOptions)
         let json = try CLIOutputRenderer.renderJSON(report: report)
         let payload = (singleOptions.outputMode == .text) ? text : json
-        try emit(payload, to: singleOptions.outputPath)
+        try emit(payload, to: singleOptions.outputPath, quiet: options.quiet)
     }
 
     // MARK: - 文件 OCR(单文件/批量)
@@ -116,11 +117,14 @@ struct MacOCRCLI {
         let text = CLIOutputRenderer.renderText(report: report, options: options)
         let json = try CLIOutputRenderer.renderJSON(report: report)
         let payload = (options.outputMode == .text) ? text : json
-        try emit(payload, to: options.outputPath)
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
     }
 
     private static func runBatchFiles(options: CLIOptions) async throws {
         let recognizer = makeRecognizer(options: options)
+        let started = Date()
+        let total = options.imageURLs.count
+        var doneCount = 0
 
         let items: [OCRBatchItem] = await withTaskGroup(of: (Int, OCRBatchItem).self) { group in
             var nextIndex = 0
@@ -140,6 +144,10 @@ struct MacOCRCLI {
 
             while let (index, item) = await group.next() {
                 collected.append((index, item))
+                doneCount += 1
+                if !options.quiet {
+                    progressLine(done: doneCount, total: total, item: item)
+                }
                 if nextIndex < options.imageURLs.count {
                     let url = options.imageURLs[nextIndex]
                     let next = nextIndex
@@ -158,9 +166,30 @@ struct MacOCRCLI {
         let text = CLIOutputRenderer.renderBatchText(batch: batch)
         let json = try CLIOutputRenderer.renderBatchJSON(batch: batch)
         let payload = (options.outputMode == .text) ? text : json
-        try emit(payload, to: options.outputPath)
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
 
+        if !options.quiet {
+            let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
+            fputs(
+                "完成: \(batch.successCount)/\(total) ok, \(batch.failureCount) failed, 用时 \(elapsed)s\n",
+                stderr
+            )
+        }
         if batch.failureCount > 0 { exit(2) }
+    }
+
+    /// 在 stderr 打印一行单张完成的进度,使用 \r 原地更新。
+    private static func progressLine(done: Int, total: Int, item: OCRBatchItem) {
+        let name = (item.imagePath as NSString).lastPathComponent
+        let status: String
+        switch item.status {
+        case .ok: status = "ok (\(item.lines?.count ?? 0) lines)"
+        case .failed: status = "FAILED: \(item.errorMessage ?? "?")"
+        }
+        let prefix = total >= 10 && done < 10 ? " " : ""
+        let line = "\r[\(done)/\(total)] \(prefix)\(name)  \(status)"
+        fputs(line, stderr)
+        if done == total { fputs("\n", stderr) }
     }
 
     // MARK: - 辅助
@@ -196,7 +225,7 @@ struct MacOCRCLI {
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
             payload = String(decoding: try encoder.encode(env), as: UTF8.self)
         }
-        try emit(payload, to: options.outputPath)
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
     }
 
     // MARK: - 从剪贴板读图 + OCR
@@ -222,7 +251,7 @@ struct MacOCRCLI {
         let text = CLIOutputRenderer.renderText(report: report, options: options)
         let json = try CLIOutputRenderer.renderJSON(report: report)
         let payload = (options.outputMode == .text) ? text : json
-        try emit(payload, to: options.outputPath)
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
     }
 
     private static func renderWindowListText(windows: [ScreenCaptureWindowInfo]) -> String {
@@ -255,7 +284,7 @@ struct MacOCRCLI {
         )
     }
 
-    private static func emit(_ payload: String, to outputPath: URL?) throws {
+    private static func emit(_ payload: String, to outputPath: URL?, quiet: Bool = false) throws {
         if let outputPath {
             try FileManager.default.createDirectory(
                 at: outputPath.deletingLastPathComponent(),
@@ -263,7 +292,9 @@ struct MacOCRCLI {
             )
             try payload.write(to: outputPath, atomically: true, encoding: .utf8)
         }
-        print(payload)
+        if !quiet {
+            print(payload)
+        }
     }
 
     /// 从 stdin 读取全部 UTF-8 文本。TTY 模式下返回 nil(避免挂起)。

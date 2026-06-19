@@ -13,6 +13,7 @@
 - **批量**：多张图片、目录递归扫描、stdin 路径列表，并发处理，单张失败不影响其他
 - **屏幕截图**：截主屏幕、按窗口标题/ID 截、截屏幕区域;另含 `--window-list` 列出可见窗口
 - **剪贴板**：截图到剪贴板(`--clipboard`)、识别剪贴板里的图片(`--from-clipboard`,配合 `Cmd+Shift+Ctrl+4` 使用)
+- **进度** + **`--quiet`**:批量模式默认在 stderr 打印每张完成进度(`[2/5] a.png  ok  3 lines`)和汇总;`--quiet` 抑制所有非错误输出,适合脚本和管道
 
 ## 编译
 
@@ -88,6 +89,18 @@ mac_ocr_cli --clipboard --window "Safari"        # 截特定窗口
 # 识别剪贴板里的图片（先用系统截图快捷键 Cmd+Shift+Ctrl+4 截到剪贴板）
 mac_ocr_cli --from-clipboard
 mac_ocr_cli --from-clipboard -k "订单号"          # 边识别边搜关键词
+```
+
+## 进度与静默
+
+- **默认**:批量模式每张图完成时在 stderr 打印 `[\r2/5] a.png  ok (3 lines)`,最后一行汇总 `完成: 3/5 ok, 2 failed, 用时 1.20s`。
+- **`--quiet` / `-q`**:抑制所有非错误输出(stdout 报告 + stderr 进度都静音)。适合 `... | jq`、CI 脚本、定时任务。错误仍然到 stderr,exit code 不变(批量有失败仍为 2)。
+- **`--output` 与 `--quiet` 正交**:`--quiet --json -o result.json batch/` 会把 JSON 写到文件,stdout 完全干净。
+
+```bash
+# 静默 + 写到文件 + shell 友好
+mac_ocr_cli --quiet --json --dir ./shots -o all.json
+if [ $? -eq 2 ]; then echo "some images failed"; fi
 ```
 
 > **剪贴板权限**：剪贴板读写**不需要**任何额外权限（TCC 不管这个）。`--clipboard` 仍需要「屏幕录制」权限,因为内部还是先截图再写入。
