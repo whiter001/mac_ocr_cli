@@ -5,10 +5,12 @@
 ## 功能
 
 - 读取 PNG / JPEG / HEIC / TIFF / GIF / WebP / PDF 单帧 等常见图片
-- 调用 `VNRecognizeTextRequest` 做文字识别，支持中英文混排
+- 调用 `VNRecognizeTextRequest` 做文字识别，默认简/繁/英三种语言同时识别
+- `--cjk` 预设额外增加粤语（香港书面语），覆盖港版 UI
 - 输出每行文字、置信度与**归一化**边界框（Vision 原生坐标系，原点在左下角）
 - 可选 JSON / 纯文本输出，可写入文件
 - 可选关键词搜索并按相关度排序
+- **批量**：多张图片、目录递归扫描（即将支持）
 
 ## 编译
 
@@ -37,6 +39,9 @@ mac_ocr_cli menu.png --level fast
 
 # 关闭语言纠错（适合代码 / 编号）
 mac_ocr_cli code.png --no-correction
+
+# 切换到 CJK 预设（简/繁/港/英）
+mac_ocr_cli menu.png --cjk
 
 # 在识别结果里搜索关键词
 mac_ocr_cli page.png -k "登录"

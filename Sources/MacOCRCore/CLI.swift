@@ -17,6 +17,7 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case conflictingKeywordWithOutput
     case invalidRegion(String)
     case invalidLevel(String)
+    case conflictingLanguageAndCJK
 
     public var errorDescription: String? {
         switch self {
@@ -28,6 +29,7 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .conflictingKeywordWithOutput: return "--keyword 与 --output/-o 不能同时使用（关键词模式按行打印，不适合结构化文件）"
         case .invalidRegion(let message): return message
         case .invalidLevel(let value): return "--level 必须是 accurate 或 fast，收到: \(value)"
+        case .conflictingLanguageAndCJK: return "--cjk 与 --lang/-l 不能同时使用"
         }
     }
 }
@@ -63,6 +65,13 @@ public struct CLIOptions: Equatable, Sendable {
 // MARK: - 参数解析
 
 public enum CLIParser {
+    /// 兜底识别集：简体 / 繁体 / 英文。Vision 会按图片内容自动挑选最合适的，
+    /// 列出多个候选几乎不增加耗时,但能避免混合语种截图里漏识别。
+    public static let defaultLanguages: [String] = ["zh-Hans", "zh-Hant", "en-US"]
+
+    /// `--cjk` 预设：增加粤语（香港书面语）以覆盖港版 UI。
+    public static let cjkLanguages: [String] = ["zh-Hans", "zh-Hant", "zh-HK", "en-US"]
+
     public static func parse(_ arguments: [String]) throws -> CLIOptions {
         if arguments.contains("--help") || arguments.contains("-h") {
             throw CLIError.helpRequested
@@ -72,10 +81,11 @@ public enum CLIParser {
         }
 
         var imagePath: String?
-        var languages: [String] = ["zh-Hans", "en-US"]
+        var languages: [String] = defaultLanguages
         var level: VNRequestTextRecognitionLevel = .accurate
         var languageCorrection = true
         var outputMode: CLIOutputMode = .text
+        var cjkPreset = false
         var explicitOutputMode = false
         var outputPath: URL?
         var keyword: String?
@@ -97,7 +107,16 @@ public enum CLIParser {
                 guard !parts.isEmpty else {
                     throw CLIError.invalidArguments("--lang 至少需要一种语言")
                 }
+                if cjkPreset { throw CLIError.conflictingLanguageAndCJK }
                 languages = parts
+
+            case "--cjk":
+                if cjkPreset == false, languages != defaultLanguages {
+                    // 用户已经显式设置了 --lang
+                    throw CLIError.conflictingLanguageAndCJK
+                }
+                languages = cjkLanguages
+                cjkPreset = true
 
             case "--level":
                 index += 1
@@ -245,7 +264,9 @@ public enum CLIPrinter {
 
     选项:
       -l, --lang <list>        识别语言，逗号分隔的 BCP-47 标签
-                               (默认: zh-Hans,en-US)
+                               (默认: zh-Hans,zh-Hant,en-US)
+      --cjk                    切换到 CJK 预设 (zh-Hans,zh-Hant,zh-HK,en-US)
+                               与 --lang 互斥
       --level <accurate|fast>  识别等级 (默认: accurate)
       --no-correction          关闭语言自动纠错
       -k, --keyword <kw>       在识别结果里搜索关键词并按相关度排序
@@ -258,7 +279,7 @@ public enum CLIPrinter {
     示例:
       mac_ocr_cli photo.png
       mac_ocr_cli shot.jpg -l en-US --level fast --json
-      mac_ocr_cli menu.png -k "登录" --json -o result.json
+      mac_ocr_cli menu.png --cjk -k "登录" --json -o result.json
     """
 
     public static let version = "mac_ocr_cli 1.0.0"

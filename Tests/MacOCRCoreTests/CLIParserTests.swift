@@ -27,12 +27,28 @@ struct CLIParserTests {
     func defaultsForMinimalInvocation() throws {
         let opts = try CLIParser.parse(["photo.png"])
         #expect(opts.imageURL == URL(fileURLWithPath: "photo.png"))
-        #expect(opts.languages == ["zh-Hans", "en-US"])
+        #expect(opts.languages == ["zh-Hans", "zh-Hant", "en-US"])
         #expect(opts.level == .accurate)
         #expect(opts.languageCorrection == true)
         #expect(opts.outputMode == .text)
         #expect(opts.outputPath == nil)
         #expect(opts.keyword == nil)
+    }
+
+    @Test("--cjk expands to CJK preset")
+    func cjkPresetExpands() throws {
+        let opts = try CLIParser.parse(["x.png", "--cjk"])
+        #expect(opts.languages == ["zh-Hans", "zh-Hant", "zh-HK", "en-US"])
+    }
+
+    @Test("--cjk combined with --lang throws")
+    func cjkAndLangConflict() {
+        #expect(throws: CLIError.conflictingLanguageAndCJK) {
+            _ = try CLIParser.parse(["x.png", "--cjk", "-l", "en-US"])
+        }
+        #expect(throws: CLIError.conflictingLanguageAndCJK) {
+            _ = try CLIParser.parse(["x.png", "-l", "en-US", "--cjk"])
+        }
     }
 
     @Test("Long-form flags propagate")
