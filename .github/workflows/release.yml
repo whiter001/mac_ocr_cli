@@ -17,7 +17,10 @@ env:
 jobs:
   test:
     name: Verify (build + tests on macOS)
-    runs-on: macos-14
+    # macos-15: ships Xcode 16+ which has Swift Testing bundled.
+    # macos-14's default Xcode 15.x has no built-in Testing module and `import Testing`
+    # fails to resolve, which is the failure we hit on commit f060864.
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,7 +46,7 @@ jobs:
   release:
     name: Build universal binary and publish release
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -131,7 +134,7 @@ jobs:
             echo "### Verification performed"
             echo
             echo "- \`swift build\` (debug)"
-            echo "- \`swift test\` (74 tests, all passing)"
+            echo "- \`swift test\` (84 tests, all passing)"
             echo "- \`swift build -c release\` (release sanity)"
             echo "- Universal binary build via \`lipo -create\` (arm64 + x86_64)"
             echo "- Smoke test: \`--version\`, \`--help\`, \`--window-list\`"
