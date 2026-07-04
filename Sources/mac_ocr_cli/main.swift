@@ -208,8 +208,10 @@ struct MacOCRCLI {
     // MARK: - 截图到剪贴板
 
     private static func runClipboardCapture(options: CLIOptions, capture: ScreenCaptureOptions) throws {
-        let (w, h) = try Clipboard.writeCapture(options: capture)
-        let savePath = capture.savePath?.path
+        let result = try Clipboard.writeCapture(options: capture)
+        let w = result.width
+        let h = result.height
+        let savePath = result.savedURL?.path
 
         let payload: String
         switch options.outputMode {

@@ -384,8 +384,94 @@ struct CLIParserTests {
 
     @Test("--window-list + --clipboard throws")
     func windowListWithClipboard() {
-        #expect(throws: CLIError.self) {
+        // F10: windowListWithClipboard 死代码删除后,这里统一走 .windowListWithOther。
+        #expect(throws: CLIError.windowListWithOther) {
             _ = try CLIParser.parse(["--window-list", "--clipboard"])
+        }
+    }
+
+    @Test("Tilde in --output/--save-screenshot/--dir expands to $HOME")
+    func tildeExpansionInPaths() throws {
+        let opts = try CLIParser.parse(["photo.png", "--output", "~/out.json"])
+        let home = NSHomeDirectory()
+        #expect(opts.outputPath?.path == "\(home)/out.json")
+    }
+
+    @Test("--keyword in batch mode throws .invalidArguments")
+    func keywordInBatchThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["a.png", "b.png", "-k", "term"])
+        }
+    }
+
+    @Test("--keyword with single file still works (regression check)")
+    func keywordInSingleFileStillWorks() throws {
+        let opts = try CLIParser.parse(["photo.png", "-k", "term"])
+        #expect(opts.keyword == "term")
+    }
+
+    @Test("--dir with no supported images throws")
+    func dirWithNoImagesThrows() throws {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_noimg_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data([0]).write(to: tmp.appendingPathComponent("a.txt"))
+        try Data([0]).write(to: tmp.appendingPathComponent("b.md"))
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--dir", tmp.path])
+        }
+    }
+
+    @Test("--from-clipboard with --keyword and --output throws .conflictingKeywordWithOutput")
+    func pasteboardKeywordWithOutputThrows() {
+        #expect(throws: CLIError.conflictingKeywordWithOutput) {
+            _ = try CLIParser.parse(["--from-clipboard", "-k", "x", "-o", "/tmp/r.json"])
+        }
+    }
+
+    @Test("--cjk after --lang with exact default value still throws")
+    func cjkAfterExactDefaultLangThrows() {
+        // F6: 之前会静默切换到 cjkLanguages,现在 userSetLang 标志让它拒绝。
+        #expect(throws: CLIError.conflictingLanguageAndCJK) {
+            _ = try CLIParser.parse(["x.png", "--lang", "zh-Hans,zh-Hant,en-US", "--cjk"])
+        }
+    }
+
+    @Test("--region rejects NaN, Infinity, -Infinity")
+    func regionRejectsNaNAndInfinity() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--region", "NaN", "0", "100", "100"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--region", "0", "0", "Infinity", "100"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--region", "0", "0", "100", "-Infinity"])
+        }
+    }
+
+    @Test("--window-list with --keyword throws")
+    func windowListWithKeywordThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--window-list", "-k", "term"])
+        }
+    }
+
+    @Test("--clipboard with --keyword throws")
+    func clipboardWithKeywordThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--clipboard", "-k", "term"])
+        }
+    }
+
+    @Test("Duplicate value-taking flag throws")
+    func duplicateValueFlagThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "-l", "en-US", "-l", "fr-FR"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "-o", "/tmp/a.json", "-o", "/tmp/b.json"])
         }
     }
 

@@ -31,7 +31,6 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case clipboardAndPasteboard
     case pasteboardWithImageInput
     case pasteboardRequiresClipboard
-    case windowListWithClipboard
 
     public var errorDescription: String? {
         switch self {
@@ -57,7 +56,6 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .clipboardAndPasteboard: return "--clipboard 与 --from-clipboard 互斥"
         case .pasteboardWithImageInput: return "--from-clipboard 不能与位置参数 / --dir / stdin `-` 同时使用"
         case .pasteboardRequiresClipboard: return "--from-clipboard 必须单独使用，不能与 --screen/--window/--region/--clipboard/--window-list 组合"
-        case .windowListWithClipboard: return "--window-list 不能与 --clipboard 同时使用"
         }
     }
 }
@@ -123,6 +121,27 @@ public enum CLIParser {
     /// `--cjk` 预设：增加粤语（香港书面语）以覆盖港版 UI。
     public static let cjkLanguages: [String] = ["zh-Hans", "zh-Hant", "zh-HK", "en-US"]
 
+    /// 共享校验:`--keyword` 与 `--output` 互斥。在 file-input / pasteboard 两个分支都要触发。
+    static func validateKeywordOutput(keyword: String?, outputPath: URL?) throws {
+        if keyword != nil, outputPath != nil {
+            throw CLIError.conflictingKeywordWithOutput
+        }
+    }
+
+    /// 把 `~` 展开成 `$HOME`。`URL(fileURLWithPath:)` 不做这件事,
+    /// 不展开会让 `--output ~/foo.json` 落到字面 `~` 文件名,而不是用户的家目录。
+    static func expandTilde(_ path: String) -> String {
+        (path as NSString).expandingTildeInPath
+    }
+
+    /// 检测值参数 flag 是否重复。重复时抛 `invalidArguments`,
+    /// 避免 `-o a.json -o b.json` 这种 last-wins 默默吞掉第一个值。
+    static func requireOnce(seen: inout Set<String>, flag: String) throws {
+        if !seen.insert(flag).inserted {
+            throw CLIError.invalidArguments("重复的参数: \(flag)")
+        }
+    }
+
     /// 解析命令行参数。
     /// - Parameter stdinReader: 注入 stdin 读取逻辑（每行一个路径）,
     ///   传入 nil 时若位置参数出现 `-` 会抛 `.stdinRequestedButNoReader`。
@@ -154,13 +173,16 @@ public enum CLIParser {
         var windowListRequested = false
         var clipboardRequested = false
         var pasteboardRequested = false
+        var userSetLang = false
 
         var index = 0
+        var seenFlags = Set<String>()
         while index < arguments.count {
             let argument = arguments[index]
 
             switch argument {
             case "--lang", "-l":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--lang 需要一个值（逗号分隔的 BCP-47 标签）")
@@ -174,16 +196,16 @@ public enum CLIParser {
                 }
                 if cjkPreset { throw CLIError.conflictingLanguageAndCJK }
                 languages = parts
+                userSetLang = true
 
             case "--cjk":
-                if cjkPreset == false, languages != defaultLanguages {
-                    // 用户已经显式设置了 --lang
-                    throw CLIError.conflictingLanguageAndCJK
-                }
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                if userSetLang { throw CLIError.conflictingLanguageAndCJK }
                 languages = cjkLanguages
                 cjkPreset = true
 
             case "--level":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--level 需要一个值: accurate 或 fast")
@@ -195,32 +217,38 @@ public enum CLIParser {
                 }
 
             case "--no-correction":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 languageCorrection = false
 
             case "--quiet", "-q":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 quiet = true
 
             case "--json":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 if explicitOutputMode, outputMode != .json { throw CLIError.conflictingOutputModes }
                 outputMode = .json
                 explicitOutputMode = true
 
             case "--text":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 if explicitOutputMode, outputMode != .text { throw CLIError.conflictingOutputModes }
                 outputMode = .text
                 explicitOutputMode = true
 
             case "--output", "-o":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--output 需要一个文件路径")
                 }
-                outputPath = URL(fileURLWithPath: arguments[index])
+                outputPath = URL(fileURLWithPath: Self.expandTilde(arguments[index]))
                 if explicitOutputMode, outputMode != .json { throw CLIError.conflictingOutputModes }
                 outputMode = .json
                 explicitOutputMode = true
 
             case "--keyword", "-k":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--keyword 需要一个值")
@@ -228,11 +256,12 @@ public enum CLIParser {
                 keyword = arguments[index]
 
             case "--dir":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--dir 需要一个目录路径")
                 }
-                let dirURL = URL(fileURLWithPath: arguments[index])
+                let dirURL = URL(fileURLWithPath: Self.expandTilde(arguments[index]))
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: dirURL.path, isDirectory: &isDir) else {
                     throw CLIError.directoryNotFound(dirURL)
@@ -243,10 +272,12 @@ public enum CLIParser {
                 inputDirs.append(dirURL)
 
             case "--screen":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 if captureSource != nil { throw CLIError.conflictingCaptureModes }
                 captureSource = .mainDisplay
 
             case "--window":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--window 需要一个窗口标题或应用名称")
@@ -255,6 +286,7 @@ public enum CLIParser {
                 captureSource = .windowQuery(arguments[index])
 
             case "--window-id":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--window-id 需要一个窗口编号")
@@ -266,25 +298,28 @@ public enum CLIParser {
                 captureSource = .windowID(parsed)
 
             case "--region":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 guard index + 4 < arguments.count,
                       let x = Double(arguments[index + 1]),
                       let y = Double(arguments[index + 2]),
                       let w = Double(arguments[index + 3]),
                       let h = Double(arguments[index + 4]),
+                      x.isFinite, y.isFinite, w.isFinite, h.isFinite,
                       w > 0, h > 0
                 else {
-                    throw CLIError.invalidArguments("--region 需要 4 个正数: x y width height")
+                    throw CLIError.invalidRegion("--region 需要 4 个有限的正数: x y width height（不允许 NaN/Infinity）")
                 }
                 if captureSource != nil { throw CLIError.conflictingCaptureModes }
                 captureSource = .region(CGRect(x: x, y: y, width: w, height: h))
                 index += 4
 
             case "--save-screenshot":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
                 index += 1
                 guard index < arguments.count else {
                     throw CLIError.invalidArguments("--save-screenshot 需要一个值")
                 }
-                saveScreenshotPath = URL(fileURLWithPath: arguments[index])
+                saveScreenshotPath = URL(fileURLWithPath: Self.expandTilde(arguments[index]))
 
             case "--window-list":
                 windowListRequested = true
@@ -328,7 +363,9 @@ public enum CLIParser {
                 || !imagePaths.isEmpty || !inputDirs.isEmpty {
                 throw CLIError.windowListWithOther
             }
-            if clipboardRequested { throw CLIError.windowListWithClipboard }
+            if keyword != nil {
+                throw CLIError.invalidArguments("--keyword 不能与 --window-list 同时使用")
+            }
             if outputPath != nil { outputMode = .json }
             return CLIOptions(
                 imageURLs: [],
@@ -347,10 +384,10 @@ public enum CLIParser {
         if clipboardRequested {
             if pasteboardRequested { throw CLIError.clipboardAndPasteboard }
             if !imagePaths.isEmpty || !inputDirs.isEmpty { throw CLIError.clipboardWithImageInput }
-            if let source = captureSource, case .region = source {
-                // --region with --clipboard: still valid, copy the region
-                _ = source
-            } else if captureSource == nil {
+            if keyword != nil {
+                throw CLIError.invalidArguments("--keyword 不能与 --clipboard 同时使用")
+            }
+            if captureSource == nil {
                 captureSource = .mainDisplay
             }
             if outputPath != nil { outputMode = .json }
@@ -380,6 +417,7 @@ public enum CLIParser {
             if !imagePaths.isEmpty || !inputDirs.isEmpty {
                 throw CLIError.pasteboardWithImageInput
             }
+            try Self.validateKeywordOutput(keyword: keyword, outputPath: outputPath)
             if keyword == nil, outputPath != nil { outputMode = .json }
             return CLIOptions(
                 imageURLs: [],
@@ -427,15 +465,13 @@ public enum CLIParser {
         }
         guard !imagePaths.isEmpty || !inputDirs.isEmpty else { throw CLIError.missingImagePath }
 
-        if keyword != nil, outputPath != nil {
-            throw CLIError.conflictingKeywordWithOutput
-        }
+        try Self.validateKeywordOutput(keyword: keyword, outputPath: outputPath)
 
-        // 合并位置参数和 --dir 扫描结果；按出现顺序去重。
+        // 合并位置参数和 --dir 扫描结果;按出现顺序去重。
         var seen = Set<String>()
         var urls: [URL] = []
         for raw in imagePaths {
-            let url = URL(fileURLWithPath: raw).standardizedFileURL
+            let url = URL(fileURLWithPath: Self.expandTilde(raw)).standardizedFileURL
             let key = url.path
             if seen.insert(key).inserted {
                 urls.append(url)
@@ -451,6 +487,14 @@ public enum CLIParser {
                     urls.append(url)
                 }
             }
+        }
+
+        // F3 + F4: 批量 keyword 与空 --dir 都是用户意图不明的状态,显式报错。
+        if !urls.isEmpty, urls.count > 1, keyword != nil {
+            throw CLIError.invalidArguments("--keyword 仅在单文件模式生效（批量请先筛选路径）")
+        }
+        if urls.isEmpty, !inputDirs.isEmpty {
+            throw CLIError.invalidArguments("--dir 指定的目录中没有受支持的图片")
         }
 
         return CLIOptions(

@@ -132,10 +132,12 @@ install_binary_from_source() {
         arm_bin="$(swift build -c release --arch arm64 --show-bin-path)/$BIN_NAME"
         x86_bin="$(swift build -c release --arch x86_64 --show-bin-path)/$BIN_NAME"
         out_dir="$(mktemp -d)"
+        # 兜底清理:即使 lipo/install 失败也保证 out_dir 不残留。
+        # set -e 会在失败时立即退出 subshell,EXIT trap 兜住任何路径。
+        trap 'rm -rf "$out_dir"' EXIT
         lipo -create -output "$out_dir/$BIN_NAME" "$arm_bin" "$x86_bin"
         mkdir -p "$PREFIX/bin"
         install -m 0755 "$out_dir/$BIN_NAME" "$PREFIX/bin/$BIN_NAME"
-        rm -rf "$out_dir"
     )
     log "Installed binary to $PREFIX/bin/$BIN_NAME"
 }

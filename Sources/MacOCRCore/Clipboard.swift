@@ -23,12 +23,22 @@ public enum ClipboardError: Error, LocalizedError {
 /// 截图到剪贴板 / 从剪贴板读图片的薄包装。
 /// 全部依赖 AppKit 的 NSPasteboard,不需要额外权限。
 public enum Clipboard {
-    /// 截图并把 PNG 写入剪贴板。返回图片尺寸供输出展示。
+    /// 截图并把 PNG 写入剪贴板。返回图片尺寸 + 真实落盘位置:
+    /// - `options.savePath == nil` 时 `savedURL == nil`(只写剪贴板)
+    /// - `options.savePath != nil` 时同时落盘到该路径,`savedURL` 等于它
     @discardableResult
-    public static func writeCapture(options: ScreenCaptureOptions) throws -> (width: Int, height: Int) {
+    public static func writeCapture(options: ScreenCaptureOptions) throws -> (width: Int, height: Int, savedURL: URL?) {
         let image = try captureForClipboard(options: options)
         try writeCGImage(image)
-        return (image.width, image.height)
+        if let savePath = options.savePath {
+            try FileManager.default.createDirectory(
+                at: savePath.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try ScreenCapture.writePNG(image: image, to: savePath)
+            return (image.width, image.height, savePath)
+        }
+        return (image.width, image.height, nil)
     }
 
     /// 把任意 CGImage 当作 PNG 写入剪贴板。
@@ -102,11 +112,11 @@ public enum Clipboard {
     }
 
     private static func captureWindow(matching query: String) throws -> CGImage {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalized = ScreenCapture.normalize(query)
         guard !normalized.isEmpty else { throw ScreenCaptureError.unableToFindWindow(query) }
         let info = ScreenCapture.listVisibleWindows().first { win in
             let candidates = [win.windowName, win.ownerName]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .compactMap { $0.map(ScreenCapture.normalize) }
                 .filter { !$0.isEmpty }
             return candidates.contains(normalized) || candidates.contains(where: { $0.contains(normalized) })
         }
@@ -120,6 +130,15 @@ public enum Clipboard {
         let displayBounds = CGDisplayBounds(displayID)
         let converted = ScreenCapture.convertRegion(rect, in: displayBounds).intersection(displayBounds)
         guard !converted.isNull, !converted.isEmpty else { throw ScreenCaptureError.invalidRegion }
+
+        // 与 ScreenCapture.captureRegion 保持一致:区域被屏幕边界裁掉时给 stderr 提示。
+        if abs(converted.width - rect.width) > 0.5 || abs(converted.height - rect.height) > 0.5 {
+            fputs(
+                "[警告] 截图区域超出主屏幕边界,实际尺寸: \(Int(converted.width))x\(Int(converted.height))（期望: \(Int(rect.width))x\(Int(rect.height))）\n",
+                stderr
+            )
+        }
+
         guard let image = CGDisplayCreateImage(displayID, rect: converted) else {
             throw ScreenCaptureError.permissionDenied(
                 "请在 系统设置 → 隐私与安全性 → 屏幕录制 中允许此程序,再重试。"

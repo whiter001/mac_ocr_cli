@@ -144,17 +144,26 @@ public enum ScreenCapture {
     }
 
     private static func captureWindow(matching query: String) throws -> CGImage {
-        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let normalized = Self.normalize(query)
         guard !normalized.isEmpty else { throw ScreenCaptureError.unableToFindWindow(query) }
 
         let info = listVisibleWindows().first { win in
             let candidates = [win.windowName, win.ownerName]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .compactMap { $0.map(Self.normalize) }
                 .filter { !$0.isEmpty }
             return candidates.contains(normalized) || candidates.contains(where: { $0.contains(normalized) })
         }
         guard let info else { throw ScreenCaptureError.unableToFindWindow(query) }
         return try captureWindow(id: info.windowID)
+    }
+
+    /// 归一化窗口匹配字符串:trim → lowercase → NFD(分解)。
+    /// 用 NFD 形式让 `"café"`(U+00E9)和 `"cafe\u{0301}"`(NFD)能互相匹配。
+    /// `internal` 是为了让 `Clipboard.captureWindow(matching:)` 复用,避免漂移。
+    static func normalize(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .decomposedStringWithCanonicalMapping
     }
 
     private static func captureRegion(rect: CGRect) throws -> CGImage {
@@ -219,7 +228,9 @@ public enum ScreenCapture {
             .appendingPathExtension("png")
     }
 
-    private static func writePNG(image: CGImage, to url: URL) throws {
+    /// 把 `CGImage` 写成 PNG 文件。会覆盖已存在的文件。
+    /// `internal` 是为了让 `Clipboard.writeCapture` 复用,避免重复实现落盘逻辑。
+    static func writePNG(image: CGImage, to url: URL) throws {
         if FileManager.default.fileExists(atPath: url.path) {
             try FileManager.default.removeItem(at: url)
         }
