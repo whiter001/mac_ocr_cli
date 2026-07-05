@@ -879,5 +879,5 @@ public enum CLIPrinter {
       mac_ocr_cli photo.png --compress-input 0.5
     """
 
-    public static let version = "mac_ocr_cli 1.0.0"
+    public static let version = "mac_ocr_cli 1.1.0"
 }
