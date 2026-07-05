@@ -77,25 +77,24 @@ struct MacOCRCLI {
         }
         defer { if isTemp { try? FileManager.default.removeItem(at: pngURL) } }
 
-        // 把截图后的 PNG 当作单文件 OCR 输入
-        let singleOptions = CLIOptions(
-            imageURLs: [pngURL],
-            languages: options.languages,
-            level: options.level,
-            languageCorrection: options.languageCorrection,
-            outputMode: options.outputMode,
-            outputPath: options.outputPath,
-            keyword: nil,
-            quiet: options.quiet
+        let recognizer = makeRecognizer(options: options)
+        let cg = try ImageLoader.loadCGImage(from: pngURL)
+        let displayPath = capture.savePath?.path ?? pngURL.path
+        let (lines, savedURL) = try await processCGImage(
+            cg,
+            displayPath: displayPath,
+            with: recognizer,
+            options: options
         )
-        let recognizer = makeRecognizer(options: singleOptions)
-        let lines = try await recognizer.recognizeText(in: pngURL)
-        let report = OCRReport(imagePath: pngURL.path, lines: lines)
+        if let savedURL, !options.quiet {
+            fputs("已保存压缩副本: \(savedURL.path)\n", stderr)
+        }
 
-        let text = CLIOutputRenderer.renderText(report: report, options: singleOptions)
+        let report = OCRReport(imagePath: displayPath, lines: lines)
+        let text = CLIOutputRenderer.renderText(report: report, options: options)
         let json = try CLIOutputRenderer.renderJSON(report: report)
-        let payload = (singleOptions.outputMode == .text) ? text : json
-        try emit(payload, to: singleOptions.outputPath, quiet: options.quiet)
+        let payload = (options.outputMode == .text) ? text : json
+        try emit(payload, to: options.outputPath, quiet: options.quiet)
     }
 
     // MARK: - 文件 OCR(单文件/批量)
@@ -111,7 +110,16 @@ struct MacOCRCLI {
     private static func runSingleFile(options: CLIOptions) async throws {
         let url = options.imageURLs[0]
         let recognizer = makeRecognizer(options: options)
-        let lines = try await recognizer.recognizeText(in: url)
+        let cg = try ImageLoader.loadCGImage(from: url)
+        let (lines, savedURL) = try await processCGImage(
+            cg,
+            displayPath: url.path,
+            with: recognizer,
+            options: options
+        )
+        if let savedURL, !options.quiet {
+            fputs("已保存压缩副本: \(savedURL.path)\n", stderr)
+        }
         let report = OCRReport(imagePath: url.path, lines: lines)
 
         let text = CLIOutputRenderer.renderText(report: report, options: options)
@@ -125,11 +133,12 @@ struct MacOCRCLI {
         let started = Date()
         let total = options.imageURLs.count
         var doneCount = 0
+        var savedCount = 0
 
-        let items: [OCRBatchItem] = await withTaskGroup(of: (Int, OCRBatchItem).self) { group in
+        let items: [OCRBatchItem] = await withTaskGroup(of: (Int, OCRBatchItem, URL?).self) { group in
             var nextIndex = 0
             var capacity = maxConcurrentImages
-            var collected: [(Int, OCRBatchItem)] = []
+            var collected: [(Int, OCRBatchItem, URL?)] = []
 
             while capacity > 0, nextIndex < options.imageURLs.count {
                 let url = options.imageURLs[nextIndex]
@@ -137,13 +146,14 @@ struct MacOCRCLI {
                 nextIndex += 1
                 capacity -= 1
                 group.addTask {
-                    let item = await recognizeOne(url: url, with: recognizer)
-                    return (index, item)
+                    let result = await processOne(url: url, with: recognizer, options: options)
+                    return (index, result.item, result.savedURL)
                 }
             }
 
-            while let (index, item) = await group.next() {
-                collected.append((index, item))
+            while let (index, item, saved) = await group.next() {
+                collected.append((index, item, saved))
+                if saved != nil { savedCount += 1 }
                 doneCount += 1
                 if !options.quiet {
                     progressLine(done: doneCount, total: total, item: item)
@@ -153,13 +163,13 @@ struct MacOCRCLI {
                     let next = nextIndex
                     nextIndex += 1
                     group.addTask {
-                        let item = await recognizeOne(url: url, with: recognizer)
-                        return (next, item)
+                        let result = await processOne(url: url, with: recognizer, options: options)
+                        return (next, result.item, result.savedURL)
                     }
                 }
             }
 
-            return collected.sorted { $0.0 < $1.0 }.map(\.1)
+            return collected.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
 
         let batch = OCRBatchReport(items: items)
@@ -170,10 +180,18 @@ struct MacOCRCLI {
 
         if !options.quiet {
             let elapsed = String(format: "%.2f", Date().timeIntervalSince(started))
-            fputs(
-                "完成: \(batch.successCount)/\(total) ok, \(batch.failureCount) failed, 用时 \(elapsed)s\n",
-                stderr
-            )
+            // 仅当启用了 --compress-output 时多打印 saved 计数,避免无谓的字段。
+            if options.compressionOutput != nil {
+                fputs(
+                    "完成: \(batch.successCount)/\(total) ok, \(savedCount) saved, \(batch.failureCount) failed, 用时 \(elapsed)s\n",
+                    stderr
+                )
+            } else {
+                fputs(
+                    "完成: \(batch.successCount)/\(total) ok, \(batch.failureCount) failed, 用时 \(elapsed)s\n",
+                    stderr
+                )
+            }
         }
         if batch.failureCount > 0 { exit(2) }
     }
@@ -234,21 +252,15 @@ struct MacOCRCLI {
 
     private static func runPasteboardOCR(options: CLIOptions) async throws {
         let cg = try Clipboard.readImage()
-
-        // CGImage → Data → 临时 PNG → Vision 走标准管线
-        let rep = NSBitmapImageRep(cgImage: cg)
-        guard let pngData = rep.representation(using: NSBitmapImageRep.FileType.png, properties: [:]) else {
-            throw ClipboardError.readDecodeFailed("无法把剪贴板图片编码为 PNG")
-        }
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mac_ocr_cli-pasteboard-\(UUID().uuidString)")
-            .appendingPathExtension("png")
-        try pngData.write(to: tmp)
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
         let recognizer = makeRecognizer(options: options)
-        let lines = try await recognizer.recognizeText(in: tmp)
-        let report = OCRReport(imagePath: "<clipboard> (\(cg.width)x\(cg.height))", lines: lines)
+        let displayPath = "<clipboard> (\(cg.width)x\(cg.height))"
+        let (lines, _) = try await processCGImage(
+            cg,
+            displayPath: displayPath,
+            with: recognizer,
+            options: options
+        )
+        let report = OCRReport(imagePath: displayPath, lines: lines)
 
         let text = CLIOutputRenderer.renderText(report: report, options: options)
         let json = try CLIOutputRenderer.renderJSON(report: report)
@@ -269,13 +281,77 @@ struct MacOCRCLI {
         return lines.joined(separator: "\n")
     }
 
-    private static func recognizeOne(url: URL, with recognizer: VisionOCRRecognizer) async -> OCRBatchItem {
+    /// 单文件批处理入口:加载 CGImage → processCGImage → 包装成 OCRBatchItem。
+    /// OCR 失败标记 .failure(影响 batch 统计),保存失败只走 stderr 警告(不影响统计)。
+    private static func processOne(
+        url: URL,
+        with recognizer: VisionOCRRecognizer,
+        options: CLIOptions
+    ) async -> (item: OCRBatchItem, savedURL: URL?) {
         do {
-            let lines = try await recognizer.recognizeText(in: url)
-            return .success(imagePath: url.path, lines: lines)
+            let cg = try ImageLoader.loadCGImage(from: url)
+            let (lines, savedURL) = try await processCGImage(
+                cg,
+                displayPath: url.path,
+                with: recognizer,
+                options: options
+            )
+            return (.success(imagePath: url.path, lines: lines), savedURL)
         } catch {
-            return .failure(imagePath: url.path, error: error)
+            return (.failure(imagePath: url.path, error: error), nil)
         }
+    }
+
+    /// 单图完整流程:解码出来的 CGImage → (按需)压缩预处理 → OCR → (按需)保存压缩副本。
+    /// 抛错表示 OCR 不可恢复(预处理失败也归到 OCR 失败,因为没图可识)。
+    /// 保存压缩副本是 best-effort,失败仅写 stderr 警告。
+    private static func processCGImage(
+        _ cg: CGImage,
+        displayPath: String,
+        with recognizer: VisionOCRRecognizer,
+        options: CLIOptions
+    ) async throws -> (lines: [OCRTextLine], savedURL: URL?) {
+        // 1. 预处理:压缩到内存中的更小 CGImage,直接喂给 OCR。
+        let ocrCG: CGImage
+        if let cfg = options.compressionInput {
+            ocrCG = try ImageCompressor.compress(cg, format: cfg.format, quality: cfg.quality)
+        } else {
+            ocrCG = cg
+        }
+
+        // 2. OCR
+        let lines = try await recognizer.recognizeText(in: ocrCG)
+
+        // 3. 保存压缩副本(best-effort,失败不抛错)
+        var savedURL: URL?
+        if let cfg = options.compressionOutput, let dir = options.compressionOutputDirectory {
+            let outURL = compressedOutputURL(for: displayPath, inDir: dir, format: cfg.format)
+            do {
+                try ImageCompressor.encode(cg, to: outURL, format: cfg.format, quality: cfg.quality)
+                savedURL = outURL
+            } catch {
+                if !options.quiet {
+                    fputs("[警告] 无法保存压缩副本 \(outURL.path): \(error.localizedDescription)\n", stderr)
+                }
+            }
+        }
+
+        return (lines, savedURL)
+    }
+
+    /// 把原文件的 stem 拼上目标目录和压缩格式的扩展名。
+    /// 例: `/a/b/photo.png` + `/out` + `.jpeg` → `/out/photo.jpg`
+    private static func compressedOutputURL(
+        for displayPath: String,
+        inDir dir: URL,
+        format: ImageFormat
+    ) -> URL {
+        // displayPath 是 URL.path 形式(不含 file:// 前缀),用 lastPathComponent 拿到文件名。
+        let nsPath = displayPath as NSString
+        let fullName = nsPath.lastPathComponent
+        let stem = (fullName as NSString).deletingPathExtension
+        let ext = ImageCompressor.fileExtension(for: format)
+        return dir.appendingPathComponent(stem).appendingPathExtension(ext)
     }
 
     private static func makeRecognizer(options: CLIOptions) -> VisionOCRRecognizer {

@@ -31,6 +31,11 @@ public enum CLIError: Error, LocalizedError, Equatable {
     case clipboardAndPasteboard
     case pasteboardWithImageInput
     case pasteboardRequiresClipboard
+    case invalidCompressionFormat(String)
+    case invalidCompressionQuality(String)
+    case compressionOutputInPasteboardMode
+    case compressionOutputRequiresDirectory
+    case compressionRequiresOCR
 
     public var errorDescription: String? {
         switch self {
@@ -56,6 +61,11 @@ public enum CLIError: Error, LocalizedError, Equatable {
         case .clipboardAndPasteboard: return "--clipboard 与 --from-clipboard 互斥"
         case .pasteboardWithImageInput: return "--from-clipboard 不能与位置参数 / --dir / stdin `-` 同时使用"
         case .pasteboardRequiresClipboard: return "--from-clipboard 必须单独使用，不能与 --screen/--window/--region/--clipboard/--window-list 组合"
+        case .invalidCompressionFormat(let value): return "不支持的压缩格式: \(value)（应为 jpeg / webp / heic / png）"
+        case .invalidCompressionQuality(let value): return "无效的压缩质量: \(value)（应为 high / medium / low 或 0..1 之间的数字）"
+        case .compressionOutputInPasteboardMode: return "--compress-output 不能与 --from-clipboard 同时使用（剪贴板图片没有可推导的文件名）"
+        case .compressionOutputRequiresDirectory: return "--compress-output 需要一个已存在的目录路径"
+        case .compressionRequiresOCR: return "--compress-input / --compress-output 不能与 --window-list 或 --clipboard 同时使用（这些模式不跑 OCR）"
         }
     }
 }
@@ -79,6 +89,12 @@ public struct CLIOptions: Equatable, Sendable {
     /// 从剪贴板读取图片并 OCR。
     public let pasteboardSource: Bool
 
+    /// OCR 之前把每张输入图重编码成更小/更省内存的格式。非 nil 时启用预处理。
+    public let compressionInput: CompressionConfig?
+    /// OCR 完成后把每张输入图的压缩副本写到 `compressionOutputDirectory`。
+    public let compressionOutput: CompressionConfig?
+    public let compressionOutputDirectory: URL?
+
     public init(
         imageURLs: [URL],
         languages: [String],
@@ -91,7 +107,10 @@ public struct CLIOptions: Equatable, Sendable {
         screenCapture: ScreenCaptureOptions? = nil,
         windowList: Bool = false,
         clipboardCapture: ScreenCaptureOptions? = nil,
-        pasteboardSource: Bool = false
+        pasteboardSource: Bool = false,
+        compressionInput: CompressionConfig? = nil,
+        compressionOutput: CompressionConfig? = nil,
+        compressionOutputDirectory: URL? = nil
     ) {
         self.imageURLs = imageURLs
         self.languages = languages
@@ -105,6 +124,9 @@ public struct CLIOptions: Equatable, Sendable {
         self.windowList = windowList
         self.clipboardCapture = clipboardCapture
         self.pasteboardSource = pasteboardSource
+        self.compressionInput = compressionInput
+        self.compressionOutput = compressionOutput
+        self.compressionOutputDirectory = compressionOutputDirectory
     }
 
     /// 单文件输入（向后兼容入口）
@@ -132,6 +154,38 @@ public enum CLIParser {
     /// 不展开会让 `--output ~/foo.json` 落到字面 `~` 文件名,而不是用户的家目录。
     static func expandTilde(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
+    }
+
+    /// 把压缩相关的 5 个原始字符串解析成两个 `CompressionConfig`。
+    /// - 格式默认 jpeg,质量默认 high。
+    /// - 输入/输出都未启用时返回 (nil, nil),节省一次空检查。
+    static func resolveCompressionOptions(
+        inputRaw: String?, inputFormatRaw: String?,
+        outputDir: URL?, outputFormatRaw: String?,
+        qualityRaw: String?
+    ) throws -> (input: CompressionConfig?, output: CompressionConfig?, outputDir: URL?) {
+        let inputFormat = try inputFormatRaw.map { raw -> ImageFormat in
+            guard let f = ImageFormat(rawValue: raw.lowercased()) else {
+                throw CLIError.invalidCompressionFormat(raw)
+            }
+            return f
+        } ?? .jpeg
+        let outputFormat = try outputFormatRaw.map { raw -> ImageFormat in
+            guard let f = ImageFormat(rawValue: raw.lowercased()) else {
+                throw CLIError.invalidCompressionFormat(raw)
+            }
+            return f
+        } ?? .jpeg
+
+        let inputConfig = try inputRaw.map { raw -> CompressionConfig in
+            CompressionConfig(format: inputFormat, quality: try ImageCompressor.resolveQuality(raw))
+        }
+
+        let outputConfig: CompressionConfig? = outputDir != nil
+            ? CompressionConfig(format: outputFormat, quality: try ImageCompressor.resolveQuality(qualityRaw ?? "high"))
+            : nil
+
+        return (inputConfig, outputConfig, outputDir)
     }
 
     /// 检测值参数 flag 是否重复。重复时抛 `invalidArguments`,
@@ -174,6 +228,14 @@ public enum CLIParser {
         var clipboardRequested = false
         var pasteboardRequested = false
         var userSetLang = false
+
+        // 压缩相关原始字符串,在所有分支结束后由 resolveCompressionOptions 统一解析。
+        // 拆分输入/输出两个独立的 format 标志,允许两种模式用不同格式。
+        var compressionInputRaw: String?
+        var compressionInputFormatRaw: String?
+        var compressionOutputDir: URL?
+        var compressionOutputFormatRaw: String?
+        var compressionQualityRaw: String?
 
         var index = 0
         var seenFlags = Set<String>()
@@ -219,6 +281,46 @@ public enum CLIParser {
             case "--no-correction":
                 try Self.requireOnce(seen: &seenFlags, flag: argument)
                 languageCorrection = false
+
+            case "--compress-input":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                index += 1
+                guard index < arguments.count, !arguments[index].hasPrefix("-") else {
+                    throw CLIError.invalidArguments("--compress-input 需要一个值: high | medium | low | 0..1")
+                }
+                compressionInputRaw = arguments[index]
+
+            case "--compress-input-format":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--compress-input-format 需要一个格式: jpeg | webp | heic | png")
+                }
+                compressionInputFormatRaw = arguments[index]
+
+            case "--compress-output":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--compress-output 需要一个目录路径")
+                }
+                compressionOutputDir = URL(fileURLWithPath: Self.expandTilde(arguments[index]))
+
+            case "--compress-output-format":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                index += 1
+                guard index < arguments.count else {
+                    throw CLIError.invalidArguments("--compress-output-format 需要一个格式: jpeg | webp | heic | png")
+                }
+                compressionOutputFormatRaw = arguments[index]
+
+            case "--compress-quality":
+                try Self.requireOnce(seen: &seenFlags, flag: argument)
+                index += 1
+                guard index < arguments.count, !arguments[index].hasPrefix("-") else {
+                    throw CLIError.invalidArguments("--compress-quality 需要一个值: high | medium | low | 0..1")
+                }
+                compressionQualityRaw = arguments[index]
 
             case "--quiet", "-q":
                 try Self.requireOnce(seen: &seenFlags, flag: argument)
@@ -354,6 +456,32 @@ public enum CLIParser {
             index += 1
         }
 
+        // 压缩相关校验 + 解析。放在分支分发之前,这样所有 5 个 init 站点都能拿到一致的值。
+        // 顺序:先做格式/质量合法性,再做跨模式的互斥检查。
+        let (compressionInputConfig, compressionOutputConfig, compressionOutputDirResolved) =
+            try Self.resolveCompressionOptions(
+                inputRaw: compressionInputRaw,
+                inputFormatRaw: compressionInputFormatRaw,
+                outputDir: compressionOutputDir,
+                outputFormatRaw: compressionOutputFormatRaw,
+                qualityRaw: compressionQualityRaw
+            )
+        if compressionInputConfig != nil || compressionOutputConfig != nil {
+            if windowListRequested || clipboardRequested {
+                throw CLIError.compressionRequiresOCR
+            }
+        }
+        if compressionOutputDir != nil, pasteboardRequested {
+            throw CLIError.compressionOutputInPasteboardMode
+        }
+        if let outDir = compressionOutputDir {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: outDir.path, isDirectory: &isDir),
+                  isDir.boolValue else {
+                throw CLIError.compressionOutputRequiresDirectory
+            }
+        }
+
         // 模式互斥：--window-list / --clipboard / 截图(--screen/--window/--window-id/--region)
         //          / --from-clipboard / 文件输入(位置参数/--dir/stdin `-`)
 
@@ -377,7 +505,10 @@ public enum CLIParser {
                 keyword: nil,
                 quiet: quiet,
                 screenCapture: nil,
-                windowList: true
+                windowList: true,
+                compressionInput: compressionInputConfig,
+                compressionOutput: compressionOutputConfig,
+                compressionOutputDirectory: compressionOutputDirResolved
             )
         }
 
@@ -406,7 +537,10 @@ public enum CLIParser {
                     source: captureSource ?? .mainDisplay,
                     savePath: saveScreenshotPath
                 ),
-                pasteboardSource: false
+                pasteboardSource: false,
+                compressionInput: compressionInputConfig,
+                compressionOutput: compressionOutputConfig,
+                compressionOutputDirectory: compressionOutputDirResolved
             )
         }
 
@@ -431,7 +565,10 @@ public enum CLIParser {
                 screenCapture: nil,
                 windowList: false,
                 clipboardCapture: nil,
-                pasteboardSource: true
+                pasteboardSource: true,
+                compressionInput: compressionInputConfig,
+                compressionOutput: compressionOutputConfig,
+                compressionOutputDirectory: compressionOutputDirResolved
             )
         }
 
@@ -455,7 +592,10 @@ public enum CLIParser {
                 keyword: nil,
                 quiet: quiet,
                 screenCapture: ScreenCaptureOptions(source: source, savePath: saveScreenshotPath),
-                windowList: false
+                windowList: false,
+                compressionInput: compressionInputConfig,
+                compressionOutput: compressionOutputConfig,
+                compressionOutputDirectory: compressionOutputDirResolved
             )
         }
 
@@ -509,7 +649,10 @@ public enum CLIParser {
             screenCapture: nil,
             windowList: false,
             clipboardCapture: nil,
-            pasteboardSource: false
+            pasteboardSource: false,
+            compressionInput: compressionInputConfig,
+            compressionOutput: compressionOutputConfig,
+            compressionOutputDirectory: compressionOutputDirResolved
         )
     }
 
@@ -700,6 +843,16 @@ public enum CLIPrinter {
       --text                   以纯文本输出 (默认)
       --json                   以 JSON 输出
       -o, --output <path>      把结果写入文件（强制 JSON）
+      --compress-input <high|medium|low|0..1>
+                               OCR 之前把图压缩成更小格式再识别
+                               (节省内存/加速批量)
+      --compress-input-format <jpeg|webp|heic|png>
+                               预处理输出格式 (默认 jpeg)
+      --compress-output <dir>  OCR 完成后把每张输入图的压缩副本写到 dir
+      --compress-output-format <jpeg|webp|heic|png>
+                               输出副本格式 (默认 jpeg)
+      --compress-quality <high|medium|low|0..1>
+                               覆盖两个模式的默认质量 (默认 high)
       -v, --version            打印版本
       -h, --help               显示本帮助
 
@@ -720,6 +873,10 @@ public enum CLIPrinter {
       mac_ocr_cli --clipboard
       # 系统自带截图快捷键 Cmd+Shift+Ctrl+4 截到剪贴板后,识别内容
       mac_ocr_cli --from-clipboard
+      # 批量 OCR + 压缩副本(默认 JPEG high)
+      mac_ocr_cli --dir ./shots --compress-output ~/compressed
+      # 高压缩比预处理(快 3-5x,适合大截图)
+      mac_ocr_cli photo.png --compress-input 0.5
     """
 
     public static let version = "mac_ocr_cli 1.0.0"

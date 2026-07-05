@@ -17,6 +17,8 @@ public enum OCRRecognizerError: Error, LocalizedError {
 
 public protocol OCRRecognizing {
     func recognizeText(in imageURL: URL) async throws -> [OCRTextLine]
+    /// CGImage 重载,给预处理(压缩后再 OCR)路径用,避免重复解码。
+    func recognizeText(in cgImage: CGImage) async throws -> [OCRTextLine]
 }
 
 /// 把 Vision 的原始识别结果整理成稳定、可测试的 `OCRTextLine` 列表。
@@ -36,9 +38,12 @@ public final class VisionOCRRecognizer: OCRRecognizing {
     }
 
     public func recognizeText(in imageURL: URL) async throws -> [OCRTextLine] {
-        // 先把图片载入成 CGImage，再交给 Vision 做文字识别。
+        // URL 版本:先解码成 CGImage,再委托给 CGImage 重载,避免逻辑重复。
         let image = try ImageLoader.loadCGImage(from: imageURL)
+        return try await recognizeText(in: image)
+    }
 
+    public func recognizeText(in cgImage: CGImage) async throws -> [OCRTextLine] {
         return try await withCheckedThrowingContinuation { continuation in
             var didResume = false
 
@@ -80,7 +85,7 @@ public final class VisionOCRRecognizer: OCRRecognizing {
             request.usesLanguageCorrection = usesLanguageCorrection
 
             do {
-                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+                try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
             } catch {
                 finish(.failure(OCRRecognizerError.visionFailure(error)))
             }

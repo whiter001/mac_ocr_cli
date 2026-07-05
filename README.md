@@ -164,6 +164,35 @@ if [ $? -eq 2 ]; then echo "some images failed"; fi
 
 > **截图权限**：macOS 10.15+ 需要「屏幕录制」权限（系统设置 → 隐私与安全性）。首次运行 Terminal / iTerm / 其他调用本工具的程序时会被提示授权,或在隐私设置中手动允许。授权后 `CGWindowListCreateImage` 即可工作;未授权时 `--window-list` 返回空,`--screen` 等会返回 nil。
 
+## 图片压缩（可选）
+
+把 Vision 跑 OCR 之前先重编码成更小格式(预处理),或者 OCR 完成后另存压缩副本(归档)。两个模式独立,可以只用其一,也可以叠加。
+
+**预处理 (`--compress-input`)**：内存里把大 PNG 重编码成 JPEG/HEIC/WebP,再喂给 OCR。适合批量处理大截图/扫描件,可以显著降低内存占用和单张耗时。
+
+**另存副本 (`--compress-output <dir>`)**：OCR 完成后,把每张输入图按新格式写入指定目录。文件名沿用输入 stem,扩展名换成目标格式。保存失败仅写 stderr 警告,**不会**标记 batch item 失败(OCR 已经成功了)。
+
+```bash
+# 高压缩比预处理(快 3-5x,适合大批量截图)
+mac_ocr_cli --dir ./shots --compress-input 0.5
+
+# 批量 OCR + 全部压缩成 WebP 到 ~/compressed
+mac_ocr_cli --dir ./shots --compress-output ~/compressed --compress-output-format webp
+
+# 两个模式叠加:预处理加速 + 另存归档(独立格式 + 独立质量)
+mac_ocr_cli --dir ./shots \
+  --compress-input medium --compress-input-format jpeg \
+  --compress-output ~/compressed --compress-output-format heic \
+  --compress-quality low
+
+# 单文件 + 仅另存为 HEIC
+mac_ocr_cli photo.png --compress-output ~/compressed --compress-output-format heic
+```
+
+质量取值：预设档位 `high`(默认,0.85)/ `medium`(0.70)/ `low`(0.50),或数字 `0.0..1.0`(仅作用于有损格式;`png` 永远走无损)。
+
+注意：`--compress-output` 不能与 `--from-clipboard` 同时使用(剪贴板没有可推导的文件名)。`--compress-input` / `--compress-output` 不能与 `--window-list` 或 `--clipboard` 同时使用(这些模式不跑 OCR)。
+
 ## 输出结构（JSON）
 
 **单文件模式**（输入只有 1 张图，schema 保持向后兼容）：

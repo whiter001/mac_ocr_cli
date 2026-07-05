@@ -507,6 +507,170 @@ struct CLIParserTests {
         #expect(opts.outputMode == .json)
     }
 
+    // MARK: - --compress-input / --compress-output
+
+    /// 共享 helper:创建一个真实存在的临时目录,用于 --compress-output 之类的目录类 flag。
+    private func makeTempDir(prefix: String) throws -> URL {
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_\(prefix)_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        // 测试结束时清理,defer 由 caller 加。
+        return tmp
+    }
+
+    @Test("--compress-input high enables preprocessing with high quality")
+    func compressInputHighEnables() throws {
+        let opts = try CLIParser.parse(["photo.png", "--compress-input", "high"])
+        #expect(opts.compressionInput != nil)
+        #expect(opts.compressionInput?.format == .jpeg)
+        #expect(opts.compressionInput?.quality == 0.85)
+        #expect(opts.compressionOutput == nil)
+    }
+
+    @Test("--compress-input 0.75 enables with numeric quality")
+    func compressInputNumericEnables() throws {
+        let opts = try CLIParser.parse(["photo.png", "--compress-input", "0.75"])
+        #expect(opts.compressionInput?.quality == 0.75)
+    }
+
+    @Test("--compress-input without value throws")
+    func compressInputMissingValueThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-input"])
+        }
+        #expect(throws: CLIError.self) {
+            // `--compress-input --quiet` 会试图把 `--quiet` 当作 quality 值,
+            // 守卫会拦下来(否则会默默吞掉 --quiet)。
+            _ = try CLIParser.parse(["photo.png", "--compress-input", "--quiet"])
+        }
+    }
+
+    @Test("--compress-input foo throws .invalidCompressionQuality")
+    func compressInputInvalidQualityThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-input", "foo"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-input", "2.0"])
+        }
+    }
+
+    @Test("--compress-input-format webp selects WebP, default quality is high")
+    func compressInputFormatWebp() throws {
+        let opts = try CLIParser.parse(["photo.png", "--compress-input", "medium", "--compress-input-format", "webp"])
+        #expect(opts.compressionInput?.format == .webp)
+        #expect(opts.compressionInput?.quality == 0.70)
+    }
+
+    @Test("Default input format is jpeg when --compress-input-format absent")
+    func defaultInputFormatIsJpeg() throws {
+        let opts = try CLIParser.parse(["photo.png", "--compress-input", "high"])
+        #expect(opts.compressionInput?.format == .jpeg)
+    }
+
+    @Test("--compress-output sets directory and default quality is high")
+    func compressOutputSetsDirectory() throws {
+        let tmp = try makeTempDir(prefix: "compress_out")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let opts = try CLIParser.parse([
+            "photo.png", "--compress-output", tmp.path
+        ])
+        #expect(opts.compressionOutput != nil)
+        #expect(opts.compressionOutput?.format == .jpeg)
+        #expect(opts.compressionOutput?.quality == 0.85)
+        #expect(opts.compressionOutputDirectory?.path == tmp.path)
+    }
+
+    @Test("--compress-output-format heic overrides output format only")
+    func compressOutputFormatHeic() throws {
+        let tmp = try makeTempDir(prefix: "compress_out_heic")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let opts = try CLIParser.parse([
+            "photo.png", "--compress-output", tmp.path,
+            "--compress-output-format", "heic"
+        ])
+        #expect(opts.compressionOutput?.format == .heic)
+    }
+
+    @Test("--compress-output without value throws")
+    func compressOutputMissingValueThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-output"])
+        }
+    }
+
+    @Test("--compress-output with missing directory throws .compressionOutputRequiresDirectory")
+    func compressOutputMissingDirThrows() {
+        let bogus = "/no/such/dir/\(UUID().uuidString)"
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-output", bogus])
+        }
+    }
+
+    @Test("--compress-quality overrides default quality for output mode")
+    func compressQualityOverridesOutput() throws {
+        let tmp = try makeTempDir(prefix: "compress_quality")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let opts = try CLIParser.parse([
+            "photo.png", "--compress-output", tmp.path,
+            "--compress-quality", "0.3"
+        ])
+        #expect(opts.compressionOutput?.quality == 0.3)
+    }
+
+    @Test("--compress-output with --from-clipboard throws .compressionOutputInPasteboardMode")
+    func compressOutputWithPasteboardThrows() {
+        #expect(throws: CLIError.self) {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mac_ocr_cli_compress_paste_\(UUID().uuidString)")
+            _ = try CLIParser.parse([
+                "--from-clipboard", "--compress-output", tmp.path
+            ])
+        }
+    }
+
+    @Test("--compress-input with --window-list throws .compressionRequiresOCR")
+    func compressInputWithWindowListThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--window-list", "--compress-input", "high"])
+        }
+    }
+
+    @Test("--compress-input with --clipboard throws .compressionRequiresOCR")
+    func compressInputWithClipboardThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["--clipboard", "--compress-input", "high"])
+        }
+    }
+
+    @Test("Duplicate --compress-input throws invalidArguments")
+    func duplicateCompressInputThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-input", "high", "--compress-input", "low"])
+        }
+    }
+
+    @Test("--compress-input-format bogus throws .invalidCompressionFormat")
+    func compressFormatBogusThrows() {
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["photo.png", "--compress-input", "high", "--compress-input-format", "gif"])
+        }
+    }
+
+    @Test("--compress-input + --compress-output share quality when --compress-quality omitted")
+    func compressInputAndOutputBothEnabled() throws {
+        let tmp = try makeTempDir(prefix: "compress_both")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let opts = try CLIParser.parse([
+            "photo.png",
+            "--compress-input", "low",
+            "--compress-output", tmp.path
+        ])
+        // input 用 low,output 走默认 high(因为没传 --compress-quality)
+        #expect(opts.compressionInput?.quality == 0.50)
+        #expect(opts.compressionOutput?.quality == 0.85)
+    }
+
     @Test("--lang without a value throws")
     func missingLangValueThrows() {
         #expect(throws: CLIError.self) {
