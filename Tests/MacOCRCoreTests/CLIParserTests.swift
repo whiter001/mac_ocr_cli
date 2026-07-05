@@ -493,7 +493,16 @@ struct CLIParserTests {
 
     @Test("--quiet can be combined with batch / --dir / --json / --output")
     func quietCombinations() throws {
-        let opts = try CLIParser.parse(["--quiet", "--dir", "/tmp", "--json", "-o", "/tmp/r.json"])
+        // 用专属临时目录并放一张图片,避免依赖 /tmp 里恰好有可识别的图片
+        // (CI runner 上的 /tmp 可能为空,会导致 .invalidArguments 抛错)
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_quiet_combo_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        try Data([0]).write(to: tmp.appendingPathComponent("a.png"))
+        let outputPath = tmp.appendingPathComponent("r.json").path
+
+        let opts = try CLIParser.parse(["--quiet", "--dir", tmp.path, "--json", "-o", outputPath])
         #expect(opts.quiet == true)
         #expect(opts.outputMode == .json)
     }
