@@ -397,11 +397,11 @@ struct CLIParserTests {
         #expect(opts.outputPath?.path == "\(home)/out.json")
     }
 
-    @Test("--keyword in batch mode throws .invalidArguments")
-    func keywordInBatchThrows() {
-        #expect(throws: CLIError.self) {
-            _ = try CLIParser.parse(["a.png", "b.png", "-k", "term"])
-        }
+    @Test("--keyword in batch mode is allowed (per-item matches)")
+    func keywordInBatchAllowed() throws {
+        let opts = try CLIParser.parse(["a.png", "b.png", "-k", "term"])
+        #expect(opts.keyword == "term")
+        #expect(opts.imageURLs.count == 2)
     }
 
     @Test("--keyword with single file still works (regression check)")
@@ -689,6 +689,140 @@ struct CLIParserTests {
     func keywordWithOutputThrows() {
         #expect(throws: CLIError.conflictingKeywordWithOutput) {
             _ = try CLIParser.parse(["x.png", "-k", "term", "-o", "/tmp/r.json"])
+        }
+    }
+
+    // MARK: - 1.2.0 新增 flag
+
+    @Test("--max-dimension sets value, rejects non-positive and non-numeric")
+    func maxDimensionFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--max-dimension", "2048"])
+        #expect(opts.maxDimension == 2048)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--max-dimension", "0"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--max-dimension", "abc"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--max-dimension"]) }
+    }
+
+    @Test("--concurrency sets value, rejects < 1")
+    func concurrencyFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--concurrency", "8"])
+        #expect(opts.concurrency == 8)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--concurrency", "0"]) }
+    }
+
+    @Test("--min-confidence sets value, rejects out of range")
+    func minConfidenceFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--min-confidence", "0.5"])
+        #expect(opts.minConfidence == 0.5)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--min-confidence", "1.5"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["x.png", "--min-confidence", "-0.1"]) }
+    }
+
+    @Test("--plain sets plain output mode; conflicts with --json")
+    func plainFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--plain"])
+        #expect(opts.outputMode == .plain)
+        #expect(throws: CLIError.conflictingOutputModes) {
+            _ = try CLIParser.parse(["x.png", "--plain", "--json"])
+        }
+    }
+
+    @Test("--jsonl sets jsonl + json mode; rejects non-batch modes")
+    func jsonlFlag() throws {
+        let opts = try CLIParser.parse(["a.png", "b.png", "--jsonl"])
+        #expect(opts.jsonl == true)
+        #expect(opts.outputMode == .json)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["a.png", "--jsonl", "--text"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--screen", "--jsonl"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--from-clipboard", "--jsonl"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-list", "--jsonl"]) }
+    }
+
+    @Test("--word-boxes sets flag")
+    func wordBoxesFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--word-boxes"])
+        #expect(opts.wordBoxes == true)
+    }
+
+    @Test("--to-clipboard sets flag; rejected with list/clipboard-capture modes")
+    func toClipboardFlag() throws {
+        let opts = try CLIParser.parse(["x.png", "--to-clipboard"])
+        #expect(opts.toClipboard == true)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-list", "--to-clipboard"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--display-list", "--to-clipboard"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--clipboard", "--to-clipboard"]) }
+    }
+
+    @Test("--barcode sets barcode mode over file inputs")
+    func barcodeFlag() throws {
+        let opts = try CLIParser.parse(["a.png", "b.png", "--barcode"])
+        #expect(opts.barcodeMode == true)
+        #expect(opts.imageURLs.count == 2)
+    }
+
+    @Test("--barcode rejects non-file modes, keyword and compression")
+    func barcodeConflicts() {
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--screen", "--barcode"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--from-clipboard", "--barcode"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--stdin-image", "--barcode"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-list", "--barcode"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["a.png", "--barcode", "-k", "x"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["a.png", "--barcode", "--compress-input", "high"]) }
+    }
+
+    @Test("--stdin-image sets stdin image mode, conflicts with other inputs")
+    func stdinImageFlag() throws {
+        let opts = try CLIParser.parse(["--stdin-image"])
+        #expect(opts.stdinImage == true)
+        #expect(opts.imageURLs.isEmpty)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--stdin-image", "a.png"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--stdin-image", "--screen"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--stdin-image", "--from-clipboard"]) }
+    }
+
+    @Test("--display sets index on screen/region/clipboard; rejected elsewhere")
+    func displayFlag() throws {
+        let screen = try CLIParser.parse(["--screen", "--display", "1"])
+        #expect(screen.screenCapture?.displayIndex == 1)
+        let region = try CLIParser.parse(["--region", "0", "0", "100", "100", "--display", "2"])
+        #expect(region.screenCapture?.displayIndex == 2)
+        let clipboard = try CLIParser.parse(["--clipboard", "--display", "1"])
+        #expect(clipboard.clipboardCapture?.displayIndex == 1)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["a.png", "--display", "1"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window", "Safari", "--display", "1"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--screen", "--display", "-1"]) }
+    }
+
+    @Test("--display-list / --lang-list set list modes and are mutually exclusive")
+    func listModeFlags() throws {
+        let d = try CLIParser.parse(["--display-list"])
+        #expect(d.displayList == true)
+        let l = try CLIParser.parse(["--lang-list"])
+        #expect(l.langList == true)
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--display-list", "--lang-list"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-list", "--display-list"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--display-list", "a.png"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--lang-list", "--screen"]) }
+    }
+
+    @Test("Duplicate --window-list / --clipboard / --from-clipboard throw")
+    func duplicateModeFlagsThrow() {
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--window-list", "--window-list"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--clipboard", "--clipboard"]) }
+        #expect(throws: CLIError.self) { _ = try CLIParser.parse(["--from-clipboard", "--from-clipboard"]) }
+    }
+
+    @Test("Explicit -l values are validated against supported languages")
+    func unsupportedLanguageThrows() throws {
+        // 系统给不出支持列表时校验会被跳过,测试也随之跳过。
+        let supported = VisionOCRRecognizer.supportedLanguages(level: .accurate)
+        guard !supported.isEmpty else { return }
+        #expect(throws: CLIError.unsupportedLanguages(["xx-XX"])) {
+            _ = try CLIParser.parse(["x.png", "-l", "xx-XX"])
+        }
+        // 默认预设语言必须能过校验(防误杀回归)
+        for lang in CLIParser.defaultLanguages {
+            #expect(throws: Never.self) { _ = try CLIParser.parse(["x.png", "-l", lang]) }
         }
     }
 }

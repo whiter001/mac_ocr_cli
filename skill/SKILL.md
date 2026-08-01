@@ -18,9 +18,14 @@ description: 'macOS OCR via the local `mac_ocr_cli` tool: read text from images,
 | "OCR this region" (with x,y,w,h) | `mac_ocr_cli --region X Y W H` |
 | "Read text from my clipboard" / "I just took a screenshot" | `mac_ocr_cli --from-clipboard` |
 | "Copy my screen to the clipboard" | `mac_ocr_cli --clipboard` |
-| "Find <keyword> in these images" | `mac_ocr_cli <files...> -k "keyword"` |
+| "Find <keyword> in these images" | `mac_ocr_cli <files...> -k "keyword"` (batch OK) |
 | "OCR all images in a directory" | `mac_ocr_cli --dir <path>` |
 | "Pipe these paths in" | `find ... \| mac_ocr_cli -` |
+| "OCR this PDF" (multi-page) | `mac_ocr_cli doc.pdf --json` (one item per page) |
+| "Read this QR code / barcode" | `mac_ocr_cli <file> --barcode` |
+| "Just give me the raw text" | `mac_ocr_cli <file> --plain` |
+| "OCR from a pipe" | `cat img.png \| mac_ocr_cli --stdin-image` |
+| "Click coordinates of a button in a screenshot" | `mac_ocr_cli <file> --word-boxes --json` |
 
 If the user has not provided an image and has not asked to capture something, **ask first** which input source they want. Don't guess.
 
@@ -34,14 +39,22 @@ If the user has not provided an image and has not asked to capture something, **
 
 | Flag | Effect |
 |---|---|
-| `-l, --lang <list>` | BCP-47 codes, comma-separated. Default: `zh-Hans,zh-Hant,en-US` |
+| `-l, --lang <list>` | BCP-47 codes, comma-separated. Default: `zh-Hans,zh-Hant,en-US`. Validated at startup; `--lang-list` shows what's supported |
 | `--cjk` | Shorthand for `zh-Hans,zh-Hant,zh-HK,en-US` |
 | `--level fast` | Faster but less accurate |
 | `--no-correction` | Disable Vision's auto language correction |
-| `--json` / `--text` | Output format (default text) |
+| `--min-confidence <0..1>` | Drop lines below the confidence threshold |
+| `--max-dimension <px>` | Downscale long edge before OCR — the real speed/memory win for big images |
+| `--concurrency <n>` | Batch parallelism (default `min(4, cores)`) |
+| `--word-boxes` | Add per-word bounding boxes (UI automation clicks) |
+| `--barcode` | Barcode/QR mode instead of text OCR |
+| `--json` / `--text` / `--plain` | Output format (`--plain` = bare text, grep-friendly) |
+| `--jsonl` | Batch streaming: one JSON line per completed image |
 | `-o, --output <path>` | Write JSON to file |
 | `-q, --quiet` | Suppress stdout/stderr chatter (errors still go to stderr) |
-| `-k, --keyword <kw>` | Filter and rank lines by keyword (single-image only) |
+| `-k, --keyword <kw>` | Filter and rank lines by keyword (single image and batch) |
+| `--display <n>` | Pick a display for `--screen`/`--region` (`--display-list` shows indices) |
+| `--to-clipboard` | Copy the recognized plain text to the clipboard |
 
 ## Capturing from the screen
 
@@ -52,8 +65,10 @@ Screen/window/region capture needs **Screen Recording permission** (System Setti
 - **One image mentioned** → single-file mode, no batching needed.
 - **Directory of images** → `--dir <path>` (recursive, filters by extension, sorted).
 - **Mixed / large list** → pipe via stdin: `find . -name "*.png" | mac_ocr_cli -`.
-- **User wants structured data** → `--json`. **User just wants to read it** → default text.
-- **User wants to grep or find a specific string** → `-k "string"`. Note: `-k` is single-image only; for batch, post-process `--json` output with `jq`.
+- **User wants structured data** → `--json`. **User just wants to read it** → default text. **User wants to grep it** → `--plain`.
+- **User wants to find a specific string** → `-k "string"` (works in batch too; batch JSON gains a `keywordMatches` field per item).
+- **Huge directory / long-running batch** → `--jsonl -o out.jsonl` (streams one line per image, constant memory).
+- **Big screenshots or scans feel slow** → `--max-dimension 2048` before anything else.
 - **User just took a screenshot with `Cmd+Shift+Ctrl+4`** → `--from-clipboard` (it's the fastest path).
 
 ## Examples

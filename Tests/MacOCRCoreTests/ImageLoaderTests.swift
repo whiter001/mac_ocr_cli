@@ -86,4 +86,74 @@ struct ImageLoaderTests {
         #expect(loaded.width == 2)
         #expect(loaded.height == 2)
     }
+
+    // MARK: - 1.2.0:降采样 / data 解码
+
+    /// 生成指定尺寸的纯色 PNG 到临时目录。
+    private func writePNG(width: Int, height: Int, name: String) throws -> URL {
+        let ctx = CGContext(
+            data: nil,
+            width: width, height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let cg = ctx.makeImage()!
+
+        let url = tempDir.appendingPathComponent(name)
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, cg, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            Issue.record("could not finalize PNG")
+            throw ImageLoaderError.decodeFailed(url)
+        }
+        return url
+    }
+
+    @Test("maxPixelSize decodes a thumbnail bounded by the long edge")
+    func maxPixelSizeThumbnail() throws {
+        let url = try writePNG(width: 100, height: 50, name: "wide.png")
+        let image = try ImageLoader.loadCGImage(from: url, maxPixelSize: 50)
+        #expect(image.width == 50)
+        #expect(image.height == 25)
+    }
+
+    @Test("maxPixelSize never upscales small images")
+    func maxPixelSizeNoUpscale() throws {
+        let url = try writePNG(width: 40, height: 30, name: "small.png")
+        let image = try ImageLoader.loadCGImage(from: url, maxPixelSize: 200)
+        #expect(image.width == 40)
+        #expect(image.height == 30)
+    }
+
+    @Test("downsample shrinks proportionally, keeps small images as-is")
+    func downsampleBehavior() throws {
+        let url = try writePNG(width: 200, height: 100, name: "big.png")
+        let big = try ImageLoader.loadCGImage(from: url)
+
+        let shrunk = ImageLoader.downsample(big, maxPixelSize: 50)
+        #expect(shrunk.width == 50)
+        #expect(shrunk.height == 25)
+
+        // 已经小于上限:原样返回(同一个 CGImage)
+        let kept = ImageLoader.downsample(big, maxPixelSize: 500)
+        #expect(kept.width == 200)
+        #expect(kept.height == 100)
+    }
+
+    @Test("loadCGImage(fromData:) decodes PNG bytes; empty data throws")
+    func fromDataDecoding() throws {
+        let url = try writePNG(width: 8, height: 6, name: "bytes.png")
+        let data = try Data(contentsOf: url)
+        let image = try ImageLoader.loadCGImage(fromData: data)
+        #expect(image.width == 8)
+        #expect(image.height == 6)
+
+        #expect(throws: ImageLoaderError.self) {
+            _ = try ImageLoader.loadCGImage(fromData: Data())
+        }
+    }
 }

@@ -162,4 +162,155 @@ struct CLIOutputRendererTests {
         #expect(fail.lines == nil)
         #expect(fail.errorMessage?.isEmpty == false)
     }
+
+    // MARK: - 1.2.0 新增渲染
+
+    @Test("Plain output is bare text, one line per result")
+    func renderPlainBareText() {
+        let out = CLIOutputRenderer.renderPlain(report: makeReport())
+        #expect(out == "Hello World\nVision OCR 测试\nGoodbye")
+    }
+
+    @Test("Batch plain prefixes every line with its path and marks failures")
+    func batchPlainOutput() {
+        let batch = OCRBatchReport(items: [
+            .success(imagePath: "/a.png", lines: [
+                OCRTextLine(index: 0, text: "hello", confidence: 0.8, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1)),
+                OCRTextLine(index: 1, text: "world", confidence: 0.8, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ]),
+            .failure(imagePath: "/b.png", error: ImageLoaderError.fileNotFound(URL(fileURLWithPath: "/b.png")))
+        ])
+        let out = CLIOutputRenderer.renderBatchPlain(batch: batch)
+        #expect(out.contains("/a.png: hello"))
+        #expect(out.contains("/a.png: world"))
+        #expect(out.contains("/b.png: [识别失败]"))
+    }
+
+    @Test("Batch plain with keyword only prints hit lines")
+    func batchPlainWithKeyword() {
+        let batch = OCRBatchReport(items: [
+            .success(imagePath: "/a.png", lines: [
+                OCRTextLine(index: 0, text: "hello", confidence: 0.8, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1)),
+                OCRTextLine(index: 1, text: "订单号 123", confidence: 0.8, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ])
+        ])
+        let out = CLIOutputRenderer.renderBatchPlain(batch: batch, keyword: "订单")
+        #expect(out.contains("/a.png: 订单号 123"))
+        #expect(!out.contains("hello"))
+    }
+
+    @Test("Batch text with keyword shows per-item hit sections")
+    func batchTextWithKeyword() {
+        let batch = OCRBatchReport(items: [
+            .success(imagePath: "/a.png", lines: [
+                OCRTextLine(index: 0, text: "登录按钮", confidence: 0.9, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ]),
+            .success(imagePath: "/b.png", lines: [
+                OCRTextLine(index: 0, text: "无关内容", confidence: 0.9, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))
+            ])
+        ])
+        let out = CLIOutputRenderer.renderBatchText(batch: batch, keyword: "登录")
+        #expect(out.contains("关键词: 登录"))
+        #expect(out.contains("命中(1)"))
+        #expect(out.contains("命中: 无"))
+        #expect(out.contains("登录按钮"))
+        // 关键词模式不刷全部行
+        #expect(!out.contains("识别行数"))
+    }
+
+    @Test("keywordMatches filters and sorts descending")
+    func keywordMatchesHelper() {
+        let matches = CLIOutputRenderer.keywordMatches(lines: makeReport().lines, keyword: "ocr")
+        #expect(matches.count == 1)
+        #expect(matches[0].text == "Vision OCR 测试")
+        #expect(matches[0].score == 0.9)
+    }
+
+    @Test("JSONL item is single-line decodable JSON")
+    func jsonlItemIsCompact() throws {
+        let item = OCRBatchItem.success(
+            imagePath: "/a.png",
+            lines: [OCRTextLine(index: 0, text: "hi", confidence: 0.9, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))],
+            imageWidth: 100,
+            imageHeight: 50,
+            durationMilliseconds: 12
+        )
+        let line = try CLIOutputRenderer.renderBatchItemJSONL(item: item)
+        #expect(!line.contains("\n"))
+        let decoded = try JSONDecoder().decode(OCRBatchItem.self, from: Data(line.utf8))
+        #expect(decoded == item)
+        #expect(decoded.imageWidth == 100)
+    }
+
+    @Test("addingKeywordMatches attaches matches, keeps metadata")
+    func batchItemKeywordMatches() {
+        let item = OCRBatchItem.success(
+            imagePath: "/a.png",
+            lines: [OCRTextLine(index: 0, text: "登录", confidence: 0.9, boundingBox: OCRBoundingBox(x: 0, y: 0, width: 0.1, height: 0.1))],
+            imageWidth: 10,
+            imageHeight: 10,
+            durationMilliseconds: 3
+        )
+        let withMatches = item.addingKeywordMatches(
+            CLIOutputRenderer.keywordMatches(lines: item.lines ?? [], keyword: "登录")
+        )
+        #expect(withMatches.keywordMatches?.count == 1)
+        #expect(withMatches.imageWidth == 10)
+        #expect(withMatches.durationMilliseconds == 3)
+    }
+
+    // MARK: - 条码渲染
+
+    private func makeBarcodeReport() -> BarcodeReport {
+        BarcodeReport(
+            imagePath: "/tmp/qr.png",
+            barcodes: [
+                OCRBarcode(
+                    symbology: "VNBarcodeSymbologyQR",
+                    payload: "https://example.com",
+                    boundingBox: OCRBoundingBox(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
+                )
+            ],
+            imageWidth: 200,
+            imageHeight: 200
+        )
+    }
+
+    @Test("Barcode text output lists count and payload")
+    func barcodeTextOutput() {
+        let out = CLIOutputRenderer.renderBarcodeText(report: makeBarcodeReport())
+        #expect(out.contains("条码数: 1"))
+        #expect(out.contains("VNBarcodeSymbologyQR"))
+        #expect(out.contains("https://example.com"))
+    }
+
+    @Test("Barcode plain output is payload only")
+    func barcodePlainOutput() {
+        #expect(CLIOutputRenderer.renderBarcodePlain(report: makeBarcodeReport()) == "https://example.com")
+    }
+
+    @Test("Barcode JSON is decodable round-trip")
+    func barcodeJSONRoundTrip() throws {
+        let json = try CLIOutputRenderer.renderBarcodeJSON(report: makeBarcodeReport())
+        let decoded = try JSONDecoder().decode(BarcodeReport.self, from: Data(json.utf8))
+        #expect(decoded == makeBarcodeReport())
+    }
+
+    @Test("Barcode batch renderers cover ok and failed")
+    func barcodeBatchRenderers() throws {
+        let batch = BarcodeBatchReport(items: [
+            .success(imagePath: "/a.png", barcodes: makeBarcodeReport().barcodes),
+            .failure(imagePath: "/b.png", error: ImageLoaderError.fileNotFound(URL(fileURLWithPath: "/b.png")))
+        ])
+        let text = CLIOutputRenderer.renderBarcodeBatchText(batch: batch)
+        #expect(text.contains("批量条码识别: 共 2 个 (成功 1, 失败 1)"))
+        #expect(text.contains("失败:"))
+        let plain = CLIOutputRenderer.renderBarcodeBatchPlain(batch: batch)
+        #expect(plain.contains("/a.png: [VNBarcodeSymbologyQR] https://example.com"))
+        #expect(plain.contains("/b.png: [识别失败]"))
+        let jsonl = try CLIOutputRenderer.renderBarcodeItemJSONL(item: batch.items[0])
+        #expect(!jsonl.contains("\n"))
+        let decoded = try JSONDecoder().decode(BarcodeBatchItem.self, from: Data(jsonl.utf8))
+        #expect(decoded.status == .ok)
+    }
 }

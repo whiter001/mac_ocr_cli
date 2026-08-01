@@ -57,6 +57,16 @@ jobs:
           sw_vers
           swift --version
 
+      - name: Inject version from tag into --version output
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i '' \
+            "s/^    public static let version = \"mac_ocr_cli .*\"$/    public static let version = \"mac_ocr_cli ${VERSION}\"/" \
+            Sources/MacOCRCore/CLI.swift
+          grep 'public static let version' Sources/MacOCRCore/CLI.swift
+
       - name: Build universal binary
         shell: bash
         run: |
@@ -84,6 +94,8 @@ jobs:
           "${ARTIFACT_NAME}/${BINARY_NAME}" --version
           "${ARTIFACT_NAME}/${BINARY_NAME}" --help > /dev/null
           "${ARTIFACT_NAME}/${BINARY_NAME}" --window-list > /dev/null
+          "${ARTIFACT_NAME}/${BINARY_NAME}" --display-list > /dev/null
+          "${ARTIFACT_NAME}/${BINARY_NAME}" --lang-list > /dev/null
 
           echo "==> Copying README into artifact"
           cp README.md "${ARTIFACT_NAME}/README.md"
@@ -134,10 +146,10 @@ jobs:
             echo "### Verification performed"
             echo
             echo "- \`swift build\` (debug)"
-            echo "- \`swift test\` (84 tests, all passing)"
+            echo "- \`swift test\` (all unit tests passing)"
             echo "- \`swift build -c release\` (release sanity)"
             echo "- Universal binary build via \`lipo -create\` (arm64 + x86_64)"
-            echo "- Smoke test: \`--version\`, \`--help\`, \`--window-list\`"
+            echo "- Smoke test: \`--version\`, \`--help\`, \`--window-list\`, \`--display-list\`, \`--lang-list\`"
             echo
             echo "### Notes"
             echo
