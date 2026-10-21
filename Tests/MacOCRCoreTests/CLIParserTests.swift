@@ -825,4 +825,39 @@ struct CLIParserTests {
             #expect(throws: Never.self) { _ = try CLIParser.parse(["x.png", "-l", lang]) }
         }
     }
+
+    @Test("Mixed short/long forms of the same flag are rejected as duplicates")
+    func mixedFlagFormsRejected() {
+        // 长短写归一到同一个语义 key,混用也算重复,不会 last-wins 吞掉第一个值。
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["x.png", "-o", "/tmp/a.json", "--output", "/tmp/b.json"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["x.png", "-l", "en-US", "--lang", "zh-Hans"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["x.png", "-k", "a", "--keyword", "b"])
+        }
+        #expect(throws: CLIError.self) {
+            _ = try CLIParser.parse(["x.png", "-q", "--quiet"])
+        }
+    }
+
+    @Test("Capture mode keeps the compression options")
+    func captureModeKeepsCompressionOptions() throws {
+        // 截图模式之前会把压缩参数整个丢掉(静默无效),现在必须透传。
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac_ocr_cli_capture_compress_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let opts = try CLIParser.parse([
+            "--screen",
+            "--compress-input", "low",
+            "--compress-output", tmp.path
+        ])
+        #expect(opts.compressionInput?.quality == 0.5)
+        #expect(opts.compressionOutput != nil)
+        #expect(opts.compressionOutputDirectory?.path == tmp.path)
+    }
 }

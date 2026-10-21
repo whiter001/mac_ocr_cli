@@ -100,19 +100,36 @@ public struct OCRReport: Codable, Hashable, Sendable {
     public let imageWidth: Int?
     public let imageHeight: Int?
     public let durationMilliseconds: Int?
+    /// 关键词命中(单文件 `-k`)。未启用关键词时为 nil,
+    /// JSON 编码时该键直接省略(向后兼容)。
+    public let keywordMatches: [OCRKeywordMatch]?
 
     public init(
         imagePath: String,
         lines: [OCRTextLine],
         imageWidth: Int? = nil,
         imageHeight: Int? = nil,
-        durationMilliseconds: Int? = nil
+        durationMilliseconds: Int? = nil,
+        keywordMatches: [OCRKeywordMatch]? = nil
     ) {
         self.imagePath = imagePath
         self.lines = lines
         self.imageWidth = imageWidth
         self.imageHeight = imageHeight
         self.durationMilliseconds = durationMilliseconds
+        self.keywordMatches = keywordMatches
+    }
+
+    /// 附加关键词命中(单文件 `-k`)。与 `OCRBatchItem` 同构。
+    public func addingKeywordMatches(_ matches: [OCRKeywordMatch]) -> OCRReport {
+        OCRReport(
+            imagePath: imagePath,
+            lines: lines,
+            imageWidth: imageWidth,
+            imageHeight: imageHeight,
+            durationMilliseconds: durationMilliseconds,
+            keywordMatches: matches
+        )
     }
 }
 

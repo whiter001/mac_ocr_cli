@@ -313,4 +313,41 @@ struct CLIOutputRendererTests {
         let decoded = try JSONDecoder().decode(BarcodeBatchItem.self, from: Data(jsonl.utf8))
         #expect(decoded.status == .ok)
     }
+
+    @Test("Plain mode prints every line when there is no keyword")
+    func renderPlainWithoutKeywordPrintsAll() {
+        let out = CLIOutputRenderer.renderPlain(report: makeReport())
+        #expect(out.contains("Hello World"))
+        #expect(out.contains("Vision OCR 测试"))
+        #expect(out.contains("Goodbye"))
+    }
+
+    @Test("Plain mode keeps only keyword-matched lines")
+    func renderPlainFiltersByKeywordMatches() {
+        let report = makeReport().addingKeywordMatches([
+            OCRKeywordMatch(index: 1, score: 0.9, text: "Vision OCR 测试")
+        ])
+        let out = CLIOutputRenderer.renderPlain(report: report)
+        #expect(out.contains("Vision OCR 测试"))
+        #expect(!out.contains("Hello World"))
+        #expect(!out.contains("Goodbye"))
+    }
+
+    @Test("JSON output omits keywordMatches when no keyword was used")
+    func renderJSONOmitsKeywordMatches() throws {
+        let json = try CLIOutputRenderer.renderJSON(report: makeReport())
+        #expect(!json.contains("keywordMatches"))
+    }
+
+    @Test("JSON output carries keywordMatches for single-file keyword mode")
+    func renderJSONIncludesKeywordMatches() throws {
+        let report = makeReport().addingKeywordMatches([
+            OCRKeywordMatch(index: 0, score: 1.0, text: "Hello World")
+        ])
+        let json = try CLIOutputRenderer.renderJSON(report: report)
+        #expect(json.contains("keywordMatches"))
+        let decoded = try JSONDecoder().decode(OCRReport.self, from: Data(json.utf8))
+        #expect(decoded.keywordMatches?.count == 1)
+        #expect(decoded.keywordMatches?.first?.index == 0)
+    }
 }

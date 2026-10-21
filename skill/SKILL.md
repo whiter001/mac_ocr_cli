@@ -33,7 +33,7 @@ If the user has not provided an image and has not asked to capture something, **
 
 - **Default (`--text`)**: human-readable. Use for showing the user a quick summary.
 - **`--json`**: structured `{ imagePath, lines: [{index, text, confidence, boundingBox}] }`. Use for piping to `jq` or further processing.
-- **`--output <path>`**: write to file, force JSON. The stdout still prints — combine with `--quiet` to silence stdout.
+- **`--output <path>`**: write to file, force JSON. The stdout still prints — combine with `--quiet` to silence stdout. (`--jsonl` is the exception: with `-o` the stream goes to the file only.)
 
 ## Common flags
 
@@ -49,10 +49,10 @@ If the user has not provided an image and has not asked to capture something, **
 | `--word-boxes` | Add per-word bounding boxes (UI automation clicks) |
 | `--barcode` | Barcode/QR mode instead of text OCR |
 | `--json` / `--text` / `--plain` | Output format (`--plain` = bare text, grep-friendly) |
-| `--jsonl` | Batch streaming: one JSON line per completed image |
+| `--jsonl` | Batch streaming: one JSON line per completed image (`-o` → file only, `--quiet` → no stdout) |
 | `-o, --output <path>` | Write JSON to file |
 | `-q, --quiet` | Suppress stdout/stderr chatter (errors still go to stderr) |
-| `-k, --keyword <kw>` | Filter and rank lines by keyword (single image and batch) |
+| `-k, --keyword <kw>` | Filter and rank lines by keyword (single image and batch): `--plain` keeps only hits, `--json` adds a `keywordMatches` field |
 | `--display <n>` | Pick a display for `--screen`/`--region` (`--display-list` shows indices) |
 | `--to-clipboard` | Copy the recognized plain text to the clipboard |
 

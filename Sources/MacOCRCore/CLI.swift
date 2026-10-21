@@ -242,12 +242,28 @@ public enum CLIParser {
         return (inputConfig, outputConfig, outputDir)
     }
 
+    /// flag 的语义 key:长短写法归一到同一个 key。
+    /// `-o` 和 `--output` 是同一个参数,必须按同一个 key 去重,
+    /// 否则 `-o a.json --output b.json` 会绕过检测、last-wins 吞掉第一个值。
+    static func semanticKey(for flag: String) -> String {
+        switch flag {
+        case "--lang", "-l": return "lang"
+        case "--quiet", "-q": return "quiet"
+        case "--output", "-o": return "output"
+        case "--keyword", "-k": return "keyword"
+        default: return flag
+        }
+    }
+
     /// 检测值参数 flag 是否重复。重复时抛 `invalidArguments`,
     /// 避免 `-o a.json -o b.json` 这种 last-wins 默默吞掉第一个值。
-    static func requireOnce(seen: inout Set<String>, flag: String) throws {
-        if !seen.insert(flag).inserted {
-            throw CLIError.invalidArguments("重复的参数: \(flag)")
+    /// `seen` 保存「语义 key → 首次出现的写法」,报错时回显首次写法。
+    static func requireOnce(seen: inout [String: String], flag: String) throws {
+        let key = semanticKey(for: flag)
+        if let first = seen[key] {
+            throw CLIError.invalidArguments("重复的参数: \(first)")
         }
+        seen[key] = flag
     }
 
     /// 解析命令行参数。
@@ -305,7 +321,7 @@ public enum CLIParser {
         var compressionQualityRaw: String?
 
         var index = 0
-        var seenFlags = Set<String>()
+        var seenFlags: [String: String] = [:]
         while index < arguments.count {
             let argument = arguments[index]
 
@@ -865,6 +881,9 @@ public enum CLIParser {
                     savePath: saveScreenshotPath,
                     displayIndex: displayIndex
                 ),
+                compressionInput: compressionInputConfig,
+                compressionOutput: compressionOutputConfig,
+                compressionOutputDirectory: compressionOutputDirResolved,
                 maxDimension: maxDimension,
                 wordBoxes: wordBoxes,
                 toClipboard: toClipboard,
@@ -1042,8 +1061,14 @@ public enum CLIOutputRenderer {
     }
 
     /// `--plain`:只输出识别文本本身,一行一条,无表头无装饰。适合 grep/管道。
+    /// 带关键词时只输出命中的行(与批量 `--plain` 行为一致)。
     public static func renderPlain(report: OCRReport) -> String {
-        report.lines.map(\.text).joined(separator: "\n")
+        let lines = report.lines
+        guard let matches = report.keywordMatches else {
+            return lines.map(\.text).joined(separator: "\n")
+        }
+        let hits = Set(matches.map(\.index))
+        return lines.filter { hits.contains($0.index) }.map(\.text).joined(separator: "\n")
     }
 
     /// 批量 `--plain`:每行 `path: text`,失败项也落一行,方便 grep 后溯源。
@@ -1301,7 +1326,8 @@ public enum CLIPrinter {
       --compress-output-format <jpeg|webp|heic|png>
                                输出副本格式 (默认 jpeg)
       --compress-quality <high|medium|low|0..1>
-                               覆盖两个模式的默认质量 (默认 high)
+                               压缩副本(另存)的质量 (默认 high;仅作用于 --compress-output,
+                               预处理质量由 --compress-input 自带)
       -v, --version            打印版本
       -h, --help               显示本帮助
 
@@ -1335,5 +1361,5 @@ public enum CLIPrinter {
       mac_ocr_cli big_scan.png --max-dimension 2048
     """
 
-    public static let version = "mac_ocr_cli 1.2.0"
+    public static let version = "mac_ocr_cli 1.3.0"
 }

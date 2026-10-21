@@ -12,9 +12,9 @@
 - `--word-boxes` 附加词级边界框(按空白切词),支撑 UI 自动化点击场景
 - `--min-confidence` 按置信度过滤低质量行
 - 可选 JSON / 纯文本 / `--plain`(裸文本,grep 友好) 输出，可写入文件
-- 可选关键词搜索并按相关度排序,**单文件和批量均可**
+- 可选关键词搜索并按相关度排序,**单文件和批量均可**;`--plain` 只输出命中行,`--json` 附带 `keywordMatches` 字段
 - **批量**：多张图片、目录递归扫描、stdin 路径列表，并发处理(`--concurrency` 可调)，单张失败不影响其他
-- **`--jsonl` 流式输出**:批量模式每完成一张写一行 JSON,大目录下内存占用与规模无关
+- **`--jsonl` 流式输出**:批量模式每完成一张写一行 JSON,大目录下内存占用与规模无关;配 `-o` 时只写文件(不再往 stdout 重复输出)
 - **`--barcode` 条码/二维码识别**(QR、Code128、EAN 等),单张/批量/JSONL 同构
 - **`--max-dimension` 解码期降采样**:大图(5K 截图、扫描件)内存和耗时成倍下降
 - **屏幕截图**：截屏(支持 `--display` 选副屏)、按窗口标题/ID 截、截屏幕区域;另含 `--window-list` / `--display-list`;macOS 14+ 走 ScreenCaptureKit
@@ -141,6 +141,7 @@ mac_ocr_cli --dir ./shots
 mac_ocr_cli --dir ./shots --json -o all.json
 
 # 批量:流式 JSONL,每完成一张写一行(大目录内存友好)
+# 配 -o 时只写文件,stdout 不重复输出
 mac_ocr_cli --dir ./shots --jsonl -o all.jsonl
 
 # 批量：stdin 路径列表（`find` 风格）
@@ -213,7 +214,7 @@ if [ $? -eq 2 ]; then echo "some images failed"; fi
 
 **预处理 (`--compress-input`)**：内存里把大 PNG 重编码成 JPEG/HEIC/WebP,再喂给 OCR。可以降低解码后位图的内存占用;但如果目标是**提速**,优先用 `--max-dimension` 降采样——重编码不改变分辨率,Vision 的计算量不变,真正的加速来自更少的像素。
 
-**另存副本 (`--compress-output <dir>`)**：OCR 完成后,把每张输入图按新格式写入指定目录。文件名沿用输入 stem,扩展名换成目标格式(多页 PDF 会带 `-p<N>` 后缀避免互相覆盖)。保存失败仅写 stderr 警告,**不会**标记 batch item 失败(OCR 已经成功了)。
+**另存副本 (`--compress-output <dir>`)**：OCR 完成后,把每张输入图按新格式写入指定目录。文件名沿用输入 stem,扩展名换成目标格式(多页 PDF 会带 `-p<N>` 后缀避免互相覆盖)。同名输入(不同目录下的同名文件,`--dir` 递归扫描时很常见)会用相对路径消歧(`a/photo.png` → `a__photo.jpg`),不会互相覆盖。保存失败仅写 stderr 警告,**不会**标记 batch item 失败(OCR 已经成功了)。
 
 ```bash
 # 大图提速的正确姿势:解码期降采样(可叠加 --compress-input 省内存)
@@ -235,9 +236,9 @@ mac_ocr_cli --dir ./shots \
 mac_ocr_cli photo.png --compress-output ~/compressed --compress-output-format heic
 ```
 
-质量取值：预设档位 `high`(默认,0.85)/ `medium`(0.70)/ `low`(0.50),或数字 `0.0..1.0`(仅作用于有损格式;`png` 永远走无损)。
+质量取值：预设档位 `high`(默认,0.85)/ `medium`(0.70)/ `low`(0.50),或数字 `0.0..1.0`(仅作用于有损格式;`png` 永远走无损)。`--compress-input` 自带质量参数(预处理质量),`--compress-quality` 只作用于 `--compress-output`(另存副本的质量)。
 
-注意：`--compress-output` 不能与 `--from-clipboard` 同时使用(剪贴板没有可推导的文件名)。`--compress-input` / `--compress-output` 不能与 `--window-list` 或 `--clipboard` 同时使用(这些模式不跑 OCR)。
+注意：`--compress-output` 不能与 `--from-clipboard` / `--stdin-image` 同时使用(没有可推导的文件名)。`--compress-input` / `--compress-output` 不能与 `--window-list` / `--display-list` / `--lang-list` / `--clipboard` 同时使用(这些模式不跑 OCR);截图模式(`--screen` / `--window` / `--window-id` / `--region`)可以正常使用,另存副本的 stem 沿用 `--save-screenshot` 的文件名,没给就用 `screen`。
 
 ## 输出结构（JSON）
 
@@ -260,7 +261,7 @@ mac_ocr_cli photo.png --compress-output ~/compressed --compress-output-format he
 }
 ```
 
-`imageWidth` / `imageHeight` / `durationMilliseconds` 是 1.2.0 新增的可选元数据(图像像素尺寸与 OCR 耗时),旧版本输出没有这些键,消费端按可选字段处理。`--word-boxes` 时每行还会多一个 `words: [{text, boundingBox}]` 字段。
+`imageWidth` / `imageHeight` / `durationMilliseconds` 是 1.2.0 新增的可选元数据(图像像素尺寸与 OCR 耗时),旧版本输出没有这些键,消费端按可选字段处理。`--word-boxes` 时每行还会多一个 `words: [{text, boundingBox}]` 字段。单文件用 `-k` 时还会多一个 `keywordMatches: [{index, score, text}]` 字段(与批量同构,按分数降序)。
 
 **批量模式**（≥ 2 张图或 `--dir`）：
 
@@ -285,7 +286,7 @@ mac_ocr_cli photo.png --compress-output ~/compressed --compress-output-format he
 - 批量模式并发上限默认为 `min(4, 核数)`,可用 `--concurrency <n>` 覆盖;输出顺序与输入一致。
 - 批量 `-k` 时每项会多一个 `keywordMatches: [{index, score, text}]` 字段(按分数降序)。
 - 批量模式在任一项失败时以 exit code **2** 退出,便于 shell 脚本判断。
-- `--jsonl` 时不再有顶层 `items` 结构:每完成一张输出一行独立的 item JSON(顺序 = 完成顺序),适合 `jq -c` / 逐行消费。
+- `--jsonl` 时不再有顶层 `items` 结构:每完成一张输出一行独立的 item JSON(顺序 = 完成顺序),适合 `jq -c` / 逐行消费。单张和批量行为一致:配 `-o` 时只写文件(不往 stdout 重复输出),每行以换行结尾;`--quiet` 时不写 stdout。
 
 **多页 PDF**：每页展开为一个批量项,`imagePath` 形如 `doc.pdf#page=2`。单页 PDF 保持单文件 schema。
 

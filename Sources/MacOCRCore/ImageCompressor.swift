@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import Darwin
 import ImageIO
 import UniformTypeIdentifiers
 
@@ -110,6 +111,8 @@ public enum ImageCompressor {
 
     /// 把 `CGImage` 按指定格式/质量写到磁盘。会覆盖已存在文件,会自动创建父目录。
     /// PNG 路径下 `quality` 被忽略(走无损)。
+    /// 先写同目录临时文件再原子 `rename` 覆盖目标:中途失败不会留下半截文件,
+    /// 同名并发写也不会互相删掉对方的文件。
     public static func encode(
         _ image: CGImage,
         to url: URL,
@@ -124,12 +127,13 @@ public enum ImageCompressor {
             throw ImageCompressorError.directoryCreationFailed(parent)
         }
 
-        if FileManager.default.fileExists(atPath: url.path) {
-            try FileManager.default.removeItem(at: url)
-        }
+        let tempURL = parent
+            .appendingPathComponent(".mac_ocr_cli-tmp-\(UUID().uuidString)")
+            .appendingPathExtension(Self.fileExtension(for: format))
+        defer { try? FileManager.default.removeItem(at: tempURL) }
 
         guard let dest = CGImageDestinationCreateWithURL(
-            url as CFURL,
+            tempURL as CFURL,
             Self.utType(for: format),
             1,
             nil
@@ -146,6 +150,14 @@ public enum ImageCompressor {
 
         guard CGImageDestinationFinalize(dest) else {
             throw ImageCompressorError.encodingFailed(url, "CGImageDestinationFinalize 返回 false")
+        }
+
+        // rename(2) 原子替换:目标已存在时直接覆盖,不存在"先删后写"的空窗。
+        guard rename(tempURL.path, url.path) == 0 else {
+            throw ImageCompressorError.encodingFailed(
+                url,
+                "无法写入目标文件 (\(String(cString: strerror(errno))))"
+            )
         }
     }
 

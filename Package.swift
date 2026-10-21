@@ -29,7 +29,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MacOCRCoreTests",
-            dependencies: ["MacOCRCore"],
+            dependencies: ["MacOCRCore", "mac_ocr_cli"],
             path: "Tests/MacOCRCoreTests"
         )
     ]

@@ -173,11 +173,21 @@ struct MacOCRCLI {
 
         let recognizer = makeRecognizer(options: options)
         let displayPath = capture.savePath?.path ?? "<screen>"
+        // 压缩副本的命名来源:有 --save-screenshot 就沿用它的 stem,否则用 "screen"
+        // (报告里的 imagePath 仍然是 "<screen>")。
+        let outputStemSource = capture.savePath?.path ?? "screen"
+        let plannedOutputURL: URL? = {
+            guard let dir = options.compressionOutputDirectory,
+                  let cfg = options.compressionOutput else { return nil }
+            return CompressedOutputPlanner(displayPaths: [outputStemSource])
+                .url(for: outputStemSource, in: dir, format: cfg.format)
+        }()
         let result = try await processCGImage(
             cg,
             displayPath: displayPath,
             with: recognizer,
-            options: options
+            options: options,
+            plannedOutputURL: plannedOutputURL
         )
         reportSavedCopy(result.savedURL, quiet: options.quiet)
 
@@ -213,15 +223,20 @@ struct MacOCRCLI {
         )
         reportSavedCopy(result.savedURL, quiet: options.quiet)
 
-        let report = OCRReport(
-            imagePath: item.displayPath,
-            lines: result.lines,
-            imageWidth: cg.width,
-            imageHeight: cg.height,
-            durationMilliseconds: result.durationMilliseconds
+        let report = attachKeywordMatches(
+            OCRReport(
+                imagePath: item.displayPath,
+                lines: result.lines,
+                imageWidth: cg.width,
+                imageHeight: cg.height,
+                durationMilliseconds: result.durationMilliseconds
+            ),
+            options: options
         )
         if options.jsonl {
             // 单文件 + --jsonl:输出一行 JSONL(与批量同构,方便统一消费)。
+            // 走 JSONLLineWriter 而不是 emit:保证「-o 只写文件、--quiet 静音 stdout、
+            // 每行带换行」三条规则与批量路径完全一致。
             let batchItem = OCRBatchItem.success(
                 imagePath: item.displayPath,
                 lines: result.lines,
@@ -230,8 +245,9 @@ struct MacOCRCLI {
                 durationMilliseconds: result.durationMilliseconds
             )
             let withMatches = attachKeywordMatches(batchItem, options: options)
-            try emit(try CLIOutputRenderer.renderBatchItemJSONL(item: withMatches),
-                     to: options.outputPath, quiet: options.quiet)
+            let writer = try JSONLLineWriter(path: options.outputPath, quiet: options.quiet)
+            try writer.write(try CLIOutputRenderer.renderBatchItemJSONL(item: withMatches))
+            try writer.close()
         } else {
             try emit(try renderReport(report, options: options), to: options.outputPath, quiet: options.quiet)
         }
@@ -246,10 +262,21 @@ struct MacOCRCLI {
         var doneCount = 0
         var savedCount = 0
 
-        // --jsonl:每完成一张立刻写一行,不攒全量(超大目录内存友好)。
-        let lineWriter = try JSONLLineWriter(path: options.jsonl ? options.outputPath : nil)
+        // 压缩副本的输出名在并发开始前一次性算好:输出目录是扁平的,不同来源目录的
+        // 同名输入会撞名(后写的直接覆盖先写的,批量模式下还会并发写同一路径)。
+        let plannedOutputs = plannedCompressedOutputs(items: items, options: options)
 
-        let batchItems: [OCRBatchItem] = await withTaskGroup(of: (Int, OCRBatchItem, URL?).self) { group in
+        // --jsonl:每完成一张立刻写一行,不攒全量(超大目录内存友好)。
+        let lineWriter = try JSONLLineWriter(
+            path: options.jsonl ? options.outputPath : nil,
+            quiet: options.quiet
+        )
+
+        // 用 throwing 版本的 task group:JSONL 写失败要往上传,
+        // 不能在并发收集的闭包里被吞掉(闭包本身是 async throwing 上下文)。
+        let batchItems: [OCRBatchItem] = try await withThrowingTaskGroup(
+            of: (Int, OCRBatchItem, URL?).self
+        ) { group in
             var nextIndex = 0
             var capacity = maxConcurrent
             var collected: [(Int, OCRBatchItem, URL?)] = []
@@ -260,27 +287,39 @@ struct MacOCRCLI {
                 nextIndex += 1
                 capacity -= 1
                 group.addTask {
-                    let result = await processOne(item: item, with: recognizer, options: options)
+                    let result = await processOne(
+                        item: item,
+                        with: recognizer,
+                        options: options,
+                        plannedOutputURL: plannedOutputs[item.displayPath]
+                    )
                     return (index, result.item, result.savedURL)
                 }
             }
 
-            while let (index, batchItem, saved) = await group.next() {
+            while let (index, batchItem, saved) = try await group.next() {
                 collected.append((index, batchItem, saved))
                 if saved != nil { savedCount += 1 }
                 doneCount += 1
                 if !options.quiet {
                     progressLine(done: doneCount, total: total, item: batchItem)
                 }
-                if options.jsonl, let line = try? CLIOutputRenderer.renderBatchItemJSONL(item: batchItem) {
-                    lineWriter.write(line)
+                if options.jsonl {
+                    // 序列化失败必须往上传:静默跳过一行等于悄悄丢数据。
+                    let line = try CLIOutputRenderer.renderBatchItemJSONL(item: batchItem)
+                    try lineWriter.write(line)
                 }
                 if nextIndex < items.count {
                     let next = items[nextIndex]
                     let nextIdx = nextIndex
                     nextIndex += 1
                     group.addTask {
-                        let result = await processOne(item: next, with: recognizer, options: options)
+                        let result = await processOne(
+                            item: next,
+                            with: recognizer,
+                            options: options,
+                            plannedOutputURL: plannedOutputs[next.displayPath]
+                        )
                         return (nextIdx, result.item, result.savedURL)
                     }
                 }
@@ -288,7 +327,7 @@ struct MacOCRCLI {
 
             return collected.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        lineWriter.close()
+        try lineWriter.close()
 
         let batch = OCRBatchReport(items: batchItems)
         if !options.jsonl {
@@ -374,9 +413,15 @@ struct MacOCRCLI {
         let total = items.count
         let maxConcurrent = max(1, options.concurrency ?? defaultMaxConcurrentImages)
         var doneCount = 0
-        let lineWriter = try JSONLLineWriter(path: options.jsonl ? options.outputPath : nil)
+        let lineWriter = try JSONLLineWriter(
+            path: options.jsonl ? options.outputPath : nil,
+            quiet: options.quiet
+        )
 
-        let batchItems: [BarcodeBatchItem] = await withTaskGroup(of: (Int, BarcodeBatchItem).self) { group in
+        // 用 throwing 版本的 task group:JSONL 写失败要往上传,不能在闭包里被吞掉。
+        let batchItems: [BarcodeBatchItem] = try await withThrowingTaskGroup(
+            of: (Int, BarcodeBatchItem).self
+        ) { group in
             var nextIndex = 0
             var capacity = maxConcurrent
             var collected: [(Int, BarcodeBatchItem)] = []
@@ -391,7 +436,7 @@ struct MacOCRCLI {
                 }
             }
 
-            while let (index, batchItem) = await group.next() {
+            while let (index, batchItem) = try await group.next() {
                 collected.append((index, batchItem))
                 doneCount += 1
                 if !options.quiet {
@@ -402,8 +447,10 @@ struct MacOCRCLI {
                     fputs("\r[\(doneCount)/\(total)] \(name)  \(status)", stderr)
                     if doneCount == total { fputs("\n", stderr) }
                 }
-                if options.jsonl, let line = try? CLIOutputRenderer.renderBarcodeItemJSONL(item: batchItem) {
-                    lineWriter.write(line)
+                if options.jsonl {
+                    // 序列化失败必须往上传:静默跳过一行等于悄悄丢数据。
+                    let line = try CLIOutputRenderer.renderBarcodeItemJSONL(item: batchItem)
+                    try lineWriter.write(line)
                 }
                 if nextIndex < items.count {
                     let next = items[nextIndex]
@@ -417,7 +464,7 @@ struct MacOCRCLI {
 
             return collected.sorted { $0.0 < $1.0 }.map { $0.1 }
         }
-        lineWriter.close()
+        try lineWriter.close()
 
         let batch = BarcodeBatchReport(items: batchItems)
         if !options.jsonl {
@@ -519,12 +566,15 @@ struct MacOCRCLI {
             with: recognizer,
             options: options
         )
-        let report = OCRReport(
-            imagePath: displayPath,
-            lines: result.lines,
-            imageWidth: cg.width,
-            imageHeight: cg.height,
-            durationMilliseconds: result.durationMilliseconds
+        let report = attachKeywordMatches(
+            OCRReport(
+                imagePath: displayPath,
+                lines: result.lines,
+                imageWidth: cg.width,
+                imageHeight: cg.height,
+                durationMilliseconds: result.durationMilliseconds
+            ),
+            options: options
         )
         try emit(try renderReport(report, options: options), to: options.outputPath, quiet: options.quiet)
         try copyTextToClipboardIfRequested(result.lines, options: options)
@@ -535,11 +585,15 @@ struct MacOCRCLI {
     /// 单图完整流程:CGImage → (按需)降采样 → (按需)压缩预处理 → OCR(计时) → (按需)保存压缩副本。
     /// 抛错表示 OCR 不可恢复(预处理失败也归到 OCR 失败,因为没图可识)。
     /// 保存压缩副本是 best-effort,失败仅写 stderr 警告。
+    /// - Parameter plannedOutputURL: 压缩副本的目标路径。批量模式下由
+    ///   `CompressedOutputPlanner` 预先算好(避免同名输入互相覆盖);
+    ///   nil 时按单文件规则即时推导。
     static func processCGImage(
         _ cg: CGImage,
         displayPath: String,
         with recognizer: VisionOCRRecognizer,
-        options: CLIOptions
+        options: CLIOptions,
+        plannedOutputURL: URL? = nil
     ) async throws -> (lines: [OCRTextLine], savedURL: URL?, durationMilliseconds: Int) {
         // 1. 降采样:截图/剪贴板/PDF 渲染等内存输入在这里统一处理;
         //    文件输入已在解码期降采样,这里是无操作的兜底。
@@ -561,7 +615,8 @@ struct MacOCRCLI {
         // 4. 保存压缩副本(best-effort,失败不抛错)
         var savedURL: URL?
         if let cfg = options.compressionOutput, let dir = options.compressionOutputDirectory {
-            let outURL = compressedOutputURL(for: displayPath, inDir: dir, format: cfg.format)
+            let outURL = plannedOutputURL
+                ?? compressedOutputURL(for: displayPath, inDir: dir, format: cfg.format)
             do {
                 try ImageCompressor.encode(cg, to: outURL, format: cfg.format, quality: cfg.quality)
                 savedURL = outURL
@@ -580,7 +635,8 @@ struct MacOCRCLI {
     private static func processOne(
         item: InputItem,
         with recognizer: VisionOCRRecognizer,
-        options: CLIOptions
+        options: CLIOptions,
+        plannedOutputURL: URL? = nil
     ) async -> (item: OCRBatchItem, savedURL: URL?) {
         do {
             let cg = try loadImage(for: item, maxDimension: options.maxDimension)
@@ -588,7 +644,8 @@ struct MacOCRCLI {
                 cg,
                 displayPath: item.displayPath,
                 with: recognizer,
-                options: options
+                options: options,
+                plannedOutputURL: plannedOutputURL
             )
             let batchItem = OCRBatchItem.success(
                 imagePath: item.displayPath,
@@ -611,24 +668,46 @@ struct MacOCRCLI {
         )
     }
 
+    /// 单文件 `-k`:给报告附加命中列表(降序)。未启用关键词时原样返回。
+    /// `--json` 会带上 `keywordMatches` 字段,`--plain` 按命中过滤输出。
+    static func attachKeywordMatches(_ report: OCRReport, options: CLIOptions) -> OCRReport {
+        guard let keyword = options.keyword else { return report }
+        return report.addingKeywordMatches(
+            CLIOutputRenderer.keywordMatches(lines: report.lines, keyword: keyword)
+        )
+    }
+
     /// 把原文件的 stem 拼上目标目录和压缩格式的扩展名。
     /// 例: `/a/b/photo.png` + `/out` + `.jpeg` → `/out/photo.jpg`
+    /// 命名规则统一由 `CompressedOutputPlanner` 负责(同名输入会按相对路径消歧)。
     private static func compressedOutputURL(
         for displayPath: String,
         inDir dir: URL,
         format: ImageFormat
     ) -> URL {
-        // displayPath 是 URL.path 形式(不含 file:// 前缀),用 lastPathComponent 拿到文件名。
-        // PDF 逐页项带 `#page=N` 后缀,拼文件名前去掉,再补回页码避免互相覆盖。
-        let pathPart = displayPath.components(separatedBy: "#page=").first ?? displayPath
-        let pageSuffix = displayPath.components(separatedBy: "#page=").count > 1
-            ? "-p" + (displayPath.components(separatedBy: "#page=").last ?? "")
-            : ""
-        let nsPath = pathPart as NSString
-        let fullName = nsPath.lastPathComponent
-        let stem = (fullName as NSString).deletingPathExtension + pageSuffix
-        let ext = ImageCompressor.fileExtension(for: format)
-        return dir.appendingPathComponent(stem).appendingPathExtension(ext)
+        let planner = CompressedOutputPlanner(displayPaths: [displayPath])
+        return planner.url(for: displayPath, in: dir, format: format)
+            ?? dir.appendingPathComponent("image")
+                .appendingPathExtension(ImageCompressor.fileExtension(for: format))
+    }
+
+    /// 批量模式下预先算出每个输入的压缩副本目标路径。
+    /// 输出目录是扁平的,不同来源目录的同名输入会撞名——用
+    /// `CompressedOutputPlanner` 按相对路径消歧,保证一个输入对应一个输出文件。
+    private static func plannedCompressedOutputs(
+        items: [InputItem],
+        options: CLIOptions
+    ) -> [String: URL] {
+        guard let dir = options.compressionOutputDirectory,
+              let cfg = options.compressionOutput else { return [:] }
+        let planner = CompressedOutputPlanner(displayPaths: items.map(\.displayPath))
+        var map: [String: URL] = [:]
+        for item in items {
+            if let url = planner.url(for: item.displayPath, in: dir, format: cfg.format) {
+                map[item.displayPath] = url
+            }
+        }
+        return map
     }
 
     // MARK: - 辅助
@@ -655,33 +734,328 @@ struct MacOCRCLI {
 
     /// --jsonl 的行写出器:有 -o 写文件,否则写 stdout。
     /// 逐行写出(而非攒全量),大目录下内存占用与输入规模无关。
+    /// - 有 `-o`:只写文件,不再往 stdout 重复输出一份。
+    ///   内容先写同目录下的临时文件,写入期间旧目标文件保持原样;
+    ///   close 时关闭句柄并用 rename(2) 原子替换目标路径,
+    ///   避免复用旧文件时残留旧尾巴,也避免中途失败留下半个文件。
+    ///   目标已存在且是普通文件时,临时文件沿用目标原有的权限位,
+    ///   避免原子替换把目标的 mode 变成默认权限。
+    ///   目标已经是符号链接时直接拒绝(不替换链接本身,链接与其目标都原样保留);
+    ///   提交前还会再复核一次目标(写入期间目标可能变成符号链接)。
+    /// - 无 `-o`:写 stdout,`--quiet` 时不写
     final class JSONLLineWriter {
-        private let handle: FileHandle?
+        /// 写出/落盘失败时抛出的错误。
+        enum WriteError: LocalizedError, Equatable {
+            case destinationIsSymbolicLink(path: String)
+            case cannotOpenOutputDirectory(path: String, code: Int32)
+            case cannotCreateTemporaryFile(path: String, code: Int32)
+            case cannotApplyPermissions(path: String, code: Int32)
+            case cannotWriteTemporaryFile(path: String, reason: String)
+            case cannotWriteToStdout(reason: String)
+            case cannotCloseTemporaryFile(path: String)
+            case cannotInspectDestination(path: String, code: Int32)
+            case cannotCommitTemporaryFile(temporary: String, destination: String, code: Int32)
 
-        init(path: URL?) throws {
+            var errorDescription: String? {
+                switch self {
+                case .destinationIsSymbolicLink(let path):
+                    return "输出路径 \(path) 是符号链接:为避免替换链接本身,拒绝写入"
+                case .cannotOpenOutputDirectory(let path, let code):
+                    return "无法打开输出目录 \(path)(errno \(code))"
+                case .cannotCreateTemporaryFile(let path, let code):
+                    return "无法创建临时文件 \(path)(errno \(code))"
+                case .cannotApplyPermissions(let path, let code):
+                    return "无法设置临时文件 \(path) 的权限位(errno \(code))"
+                case .cannotWriteTemporaryFile(let path, let reason):
+                    return "无法写入临时文件 \(path)(\(reason))"
+                case .cannotWriteToStdout(let reason):
+                    return "无法写入 stdout(\(reason))"
+                case .cannotCloseTemporaryFile(let path):
+                    return "无法关闭临时文件 \(path)"
+                case .cannotInspectDestination(let path, let code):
+                    return "无法检查输出路径 \(path)(errno \(code))"
+                case .cannotCommitTemporaryFile(let temporary, let destination, let code):
+                    return "无法把临时文件 \(temporary) 原子替换为 \(destination)(errno \(code))"
+                }
+            }
+        }
+
+        /// 临时文件名前缀:与目标同目录,隐藏文件,方便失败时清理。
+        private static let temporaryFilePrefix = ".mac_ocr_cli-jsonl-"
+
+        private var handle: FileHandle?
+        private let writesToStdout: Bool
+        /// 目标路径;非 nil 表示文件模式。
+        private let destination: URL?
+        /// 临时文件在输出目录里的名字(unlinkat / renameat 用)。
+        private var temporaryName: String?
+        /// 临时文件的完整路径(仅用于报错信息)。
+        private var temporaryPath: String?
+        /// 输出目录的文件描述符:清理与提交都走 fd,不再按路径二次解析。
+        private var directoryDescriptor: Int32?
+        /// 写失败后记住的错误:之后的 write 直接重复抛出,不再静默丢数据。
+        private var writeFailure: WriteError?
+
+        init(path: URL?, quiet: Bool) throws {
             if let path {
+                let directory = path.deletingLastPathComponent()
                 try FileManager.default.createDirectory(
-                    at: path.deletingLastPathComponent(),
+                    at: directory,
                     withIntermediateDirectories: true
                 )
-                FileManager.default.createFile(atPath: path.path, contents: nil)
-                handle = try FileHandle(forWritingTo: path)
+                // 目标已经是符号链接:直接拒绝。
+                // 原子 rename 只会替换链接本身(不会写进链接指向的文件),
+                // 那等于悄悄丢掉用户的链接结构;这里明确报错,链接与其目标都原样保留。
+                if Self.isSymbolicLink(at: path) {
+                    throw WriteError.destinationIsSymbolicLink(path: path.path)
+                }
+                // 目标已存在且是普通文件时,先记下它的权限位:
+                // 临时文件是按 0600 建的,直接 rename 过去会把目标权限改成 0600。
+                let destinationMode = Self.posixPermissionMode(ofRegularFileAt: path)
+
+                let directoryFD = directory.path.withCString {
+                    open($0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+                }
+                guard directoryFD >= 0 else {
+                    throw WriteError.cannotOpenOutputDirectory(path: directory.path, code: errno)
+                }
+
+                let name = "\(Self.temporaryFilePrefix)\(UUID().uuidString).tmp"
+                // 完整路径只用于报错信息;文件本身在目录 fd 下相对创建,
+                // 避免「按路径二次解析」带来的 TOCTOU(路径被替换就写到别处)。
+                let temporary = directory.appendingPathComponent(name).path
+                let creation = Self.createTemporaryFile(directoryDescriptor: directoryFD, name: name)
+                guard creation.fd >= 0 else {
+                    let code = creation.errorCode
+                    _ = unistd.close(directoryFD)
+                    throw WriteError.cannotCreateTemporaryFile(path: temporary, code: code)
+                }
+                let temporaryFD = creation.fd
+
+                // 权限用 fd 设置(fchmod):目标可能是只读的(如 0400),
+                // 按路径 chmod 之后再打开会因为没有写权限而失败;
+                // 而且这里失败必须报错,不能悄悄放行一个权限不对的临时文件。
+                let desiredMode = destinationMode ?? Self.defaultCreationMode()
+                if fchmod(temporaryFD, desiredMode) != 0 {
+                    let code = errno
+                    _ = unistd.close(temporaryFD)
+                    _ = name.withCString { unlinkat(directoryFD, $0, 0) }
+                    _ = unistd.close(directoryFD)
+                    throw WriteError.cannotApplyPermissions(path: temporary, code: code)
+                }
+
+                handle = FileHandle(fileDescriptor: temporaryFD, closeOnDealloc: true)
+                writesToStdout = false
+                destination = path
+                temporaryName = name
+                temporaryPath = temporary
+                directoryDescriptor = directoryFD
             } else {
                 handle = nil
+                writesToStdout = !quiet
+                destination = nil
             }
         }
 
-        func write(_ line: String) {
+        /// 写出一行(自动补换行)。写失败时抛错:
+        /// 文件模式下会关闭句柄并删除临时文件,目标文件保持原样。
+        func write(_ line: String) throws {
+            if let failure = writeFailure { throw failure }
             guard let data = (line + "\n").data(using: .utf8) else { return }
             if let handle {
-                handle.write(data)
-            } else {
-                FileHandle.standardOutput.write(data)
+                do {
+                    try handle.write(contentsOf: data)
+                } catch {
+                    let path = temporaryPath ?? ""
+                    let failure = WriteError.cannotWriteTemporaryFile(
+                        path: path,
+                        reason: error.localizedDescription
+                    )
+                    // 写失败:关句柄 + 删临时文件,目标文件保持原样。
+                    abortTemporaryFile()
+                    writeFailure = failure
+                    throw failure
+                }
+            } else if writesToStdout {
+                do {
+                    try FileHandle.standardOutput.write(contentsOf: data)
+                } catch {
+                    throw WriteError.cannotWriteToStdout(reason: error.localizedDescription)
+                }
             }
         }
 
-        func close() {
-            try? handle?.close()
+        /// 结束写出。文件模式下:先复核目标路径,再关闭临时文件句柄,
+        /// 最后用 rename(2) 原子替换目标路径。
+        /// 失败时抛错(临时文件会被清理,目标文件保持原样)。
+        func close() throws {
+            guard let handle else { return }  // stdout 模式(或已关闭):无事可做
+            self.handle = nil
+            // 提交前复核目标:init 时的符号链接检查与真正提交之间存在时间窗口,
+            // 期间目标可能已被换成符号链接。这里再查一次:
+            // 目标是符号链接就拒绝(既不跟随,也不替换),目标不存在就照常提交。
+            do {
+                try revalidateDestinationBeforeCommit()
+            } catch {
+                try? handle.close()
+                cleanupTemporaryFile()
+                throw error
+            }
+            do {
+                try handle.close()
+            } catch {
+                let path = temporaryPath ?? ""
+                cleanupTemporaryFile()
+                throw WriteError.cannotCloseTemporaryFile(path: path)
+            }
+            guard let name = temporaryName,
+                  let destination,
+                  let directoryFD = directoryDescriptor else { return }
+            // 用 renameat 提交:目标与临时文件在同一个目录 fd 下解析,不再按路径重解析。
+            let destinationName = destination.lastPathComponent
+            let result = name.withCString { temporary in
+                destinationName.withCString { target in
+                    renameat(directoryFD, temporary, directoryFD, target)
+                }
+            }
+            if result != 0 {
+                let code = errno
+                cleanupTemporaryFile()
+                throw WriteError.cannotCommitTemporaryFile(
+                    temporary: temporaryPath ?? name,
+                    destination: destination.path,
+                    code: code
+                )
+            }
+            // 提交成功:临时文件已经变成目标文件,只剩关目录 fd。
+            temporaryName = nil
+            temporaryPath = nil
+            closeDirectoryDescriptor()
+        }
+
+        deinit {
+            // 未 close(或 close 失败)时兜底清理临时文件。
+            cleanupTemporaryFile()
+        }
+
+        /// 新建文件的默认权限:0666 & ~umask(与 open(..., 0o666) 的结果一致)。
+        /// 读取 umask 时先临时收紧再立刻恢复,避免读 umask 的窗口里
+        /// 意外放宽其他线程创建文件的权限。
+        private static func defaultCreationMode() -> mode_t {
+            let mask = umask(0o077)
+            _ = umask(mask)
+            return 0o666 & ~mask
+        }
+
+        /// 路径存在且是符号链接时返回 true。
+        /// 用 lstat:stat 会跟随链接,看不到链接本身。
+        private static func isSymbolicLink(at url: URL) -> Bool {
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { return false }
+            return (info.st_mode & S_IFMT) == S_IFLNK
+        }
+
+        /// 路径已存在且是普通文件时,返回它的 POSIX 权限位(否则 nil)。
+        /// 用 lstat:软链接本身不是普通文件,不能按链接目标的权限来建临时文件。
+        private static func posixPermissionMode(ofRegularFileAt url: URL) -> mode_t? {
+            var info = stat()
+            guard lstat(url.path, &info) == 0 else { return nil }
+            guard (info.st_mode & S_IFMT) == S_IFREG else { return nil }
+            return info.st_mode & 0o7777
+        }
+
+        /// 在已打开的目录 fd 下用 openat(2) 相对创建临时文件。
+        /// O_EXCL 保证不会复用已存在的名字,O_NOFOLLOW 保证不会跟随符号链接,
+        /// O_CREAT 用 0600 建文件:写入期间只有本人可读写。
+        /// 名字相对目录 fd 解析,不再按路径二次解析,避免路径 TOCTOU。
+        /// 失败时返回 (-1, errno),由调用方决定错误语义。
+        static func createTemporaryFile(
+            directoryDescriptor: Int32,
+            name: String
+        ) -> (fd: Int32, errorCode: Int32) {
+            let fd = name.withCString {
+                openat(
+                    directoryDescriptor,
+                    $0,
+                    O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
+                    mode_t(0o600)
+                )
+            }
+            if fd < 0 { return (-1, errno) }
+            return (fd, 0)
+        }
+
+        /// 写失败时的兜底:关闭临时句柄并删除临时文件,目标文件保持原样。
+        private func abortTemporaryFile() {
+            if let handle {
+                self.handle = nil
+                try? handle.close()
+            }
+            cleanupTemporaryFile()
+        }
+
+        /// 测试钩子:提前关闭底层句柄,让下一次写入必然失败,
+        /// 用来验证「写失败 → 清理临时文件 → 目标文件保持原样」这条路径。
+        func invalidateHandleForTesting() throws {
+            try handle?.close()
+        }
+
+        /// 提交前复核目标路径(在目录 fd 下用 fstatat,AT_SYMLINK_NOFOLLOW):
+        /// - 目标是符号链接:拒绝(不跟随、不替换),沿用 init 阶段的同款错误。
+        /// - 目标不存在:正常,照常提交(rename 的覆盖语义由内核决定)。
+        /// - 目标仍是普通文件:沿用它当前的权限位,免得原子替换把目标的 mode 改掉
+        ///   (init 时读到的权限位可能已经过时)。
+        /// - 其他 stat 错误:当作失败,调用方负责清理临时文件。
+        private func revalidateDestinationBeforeCommit() throws {
+            guard let destination, let directoryFD = directoryDescriptor else { return }
+            let destinationName = destination.lastPathComponent
+            var info = stat()
+            let result = destinationName.withCString {
+                fstatat(directoryFD, $0, &info, AT_SYMLINK_NOFOLLOW)
+            }
+            if result != 0 {
+                let code = errno
+                // 目标不存在:正常路径,继续提交。
+                if code == ENOENT { return }
+                throw WriteError.cannotInspectDestination(path: destination.path, code: code)
+            }
+            let kind = info.st_mode & S_IFMT
+            if kind == S_IFLNK {
+                throw WriteError.destinationIsSymbolicLink(path: destination.path)
+            }
+            if kind == S_IFREG, let name = temporaryName {
+                // 目标还是普通文件:用 fchmodat(目录 fd 相对)把临时文件的权限位对齐,
+                // 保持「原子替换不改变目标权限」的行为。
+                let mode = info.st_mode & 0o7777
+                let chmodResult = name.withCString {
+                    fchmodat(directoryFD, $0, mode, AT_SYMLINK_NOFOLLOW)
+                }
+                if chmodResult != 0 {
+                    let code = errno
+                    throw WriteError.cannotApplyPermissions(
+                        path: temporaryPath ?? name,
+                        code: code
+                    )
+                }
+            }
+        }
+
+        /// 清理临时文件:按目录 fd 调 unlinkat,再关掉目录 fd。
+        /// 清理是 best-effort:失败只影响残留的临时文件,不掩盖调用方的主错误。
+        private func cleanupTemporaryFile() {
+            if let name = temporaryName, let directoryFD = directoryDescriptor {
+                _ = name.withCString { unlinkat(directoryFD, $0, 0) }
+            }
+            temporaryName = nil
+            temporaryPath = nil
+            closeDirectoryDescriptor()
+        }
+
+        private func closeDirectoryDescriptor() {
+            if let fd = directoryDescriptor {
+                directoryDescriptor = nil
+                _ = unistd.close(fd)
+            }
         }
     }
 
